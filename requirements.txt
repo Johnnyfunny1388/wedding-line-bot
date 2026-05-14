@@ -1,4 +1,5 @@
 flask
+gunicorn
 line-bot-sdk
 google-auth
 google-auth-oauthlib
