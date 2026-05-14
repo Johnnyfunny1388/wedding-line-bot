@@ -31,7 +31,7 @@ def log_to_sheets(timestamp, group_name, sender, message, msg_type):
         values = [[timestamp, group_name, sender, message, msg_type]]
         service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Sheet1!A:E",
+            range="A:E",
             valueInputOption="RAW",
             body={"values": values}
         ).execute()
