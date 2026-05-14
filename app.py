@@ -107,7 +107,7 @@ def handle_message(event):
 
     log_to_sheets(timestamp, group_name, sender_name, user_message, "text")
 
-    if user_message.startswith("@維多") or event.source.type != "group":
+    if user_message.startswith("@利亞") or event.source.type != "group":
         reply = get_ai_reply(user_message)
         line_bot_api.reply_message(
             event.reply_token,
