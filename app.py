@@ -82,6 +82,8 @@ To view the full wedding menu, tell customers to type: "wedding menu"
 5. For complex needs, say a specialist will follow up
 6. If customer clearly states wedding or banquet, provide wedding info directly without asking about year-end banquet
 7. If customer clearly states year-end or spring banquet or corporate event, provide corporate info directly without asking about wedding
+8. If customer mentions table count or guest count without specifying event type, ask only ONE question: what type of event is it. Once event type is confirmed, do not ask again and proceed directly to provide relevant information.
+9. If customer is discussing wedding details such as tables, menu, decoration, flowers, or any wedding-related topic, do not ask if it is a year-end banquet or other event type. Stay focused on the wedding topic.
 """
 
 def get_sheets_service():
