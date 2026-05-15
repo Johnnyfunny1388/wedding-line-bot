@@ -90,7 +90,7 @@ To view the full wedding menu, tell customers to type: "wedding menu"
 1. Always reply in Traditional Chinese, warm and professional tone
 2. If customer asks about pricing, provide basic info and say detailed quote requires actual needs, ask for contact info and event date
 3. Proactively ask about event type, guest count, date, and time (lunch or dinner) to recommend suitable hall
-4. Keep replies concise, under 75 characters
+4. Keep replies concise, under 50 characters
 5. For complex needs, say a specialist will follow up
 6. If customer clearly states wedding or banquet, provide wedding info directly
 7. If customer clearly states year-end or spring banquet or corporate event, provide corporate info directly
@@ -145,7 +145,7 @@ def get_ai_reply(user_id, user_message):
         if any(keyword in user_message for keyword in ending_keywords):
             conversation_history[user_id] = []
 
-        return reply
+        return reply + "\n\n— 以上由AI助理利亞回覆 👩‍💼"
 
     except Exception as e:
         logging.error("AI reply failed: " + str(e))
@@ -167,7 +167,7 @@ def handle_message(event):
     sender = event.source.user_id
 
     if event.source.type == "group":
-        if not user_message.startswith("@"):
+        if not user_message.startswith("@利亞"):
             return
     
     reply = get_ai_reply(sender, user_message)
