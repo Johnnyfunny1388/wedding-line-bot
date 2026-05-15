@@ -19,9 +19,23 @@ anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
 
 conversation_history = {}
+last_active = {}
+
+def cleanup_old_conversations():
+    current_time = datetime.now()
+    inactive_users = []
+    for user_id, last_time in last_active.items():
+        diff = (current_time - last_time).seconds
+        if diff > 3600:
+            inactive_users.append(user_id)
+    for user_id in inactive_users:
+        if user_id in conversation_history:
+            del conversation_history[user_id]
+        del last_active[user_id]
+
 
 SYSTEM_PROMPT = """
-You are a professional consultant AI assistant for Victoria Banquet Hall. Your name is Lia.
+You are a professional consultant AI assistant for Victoria Banquet Hall. Your name is Ria.
 Please always reply in Traditional Chinese with a warm and professional tone.
 
 [Venue Information]
@@ -32,7 +46,7 @@ Please always reply in Traditional Chinese with a warm and professional tone.
 - Parking: 400 free VIP parking spaces behind the banquet hall
 
 [Services]
-- Wedding banquets, Year-end/Spring banquets, Large dinners, Private room family banquets, Venue rental, Teacher appreciation banquets (coming soon)
+- Wedding banquets, Year-end/Spring banquets, Large dinners, Private room family banquets, Venue rental, Teacher appreciation banquets
 
 [Wedding Package]
 Included amenities:
@@ -54,7 +68,7 @@ Bride exclusive services:
 - Professional wedding planner (not MC or host)
 
 Add-on services:
-- Host/band: NT$8,800+
+- Host/band: NT$10,800+
 - Wedding consultant: NT$10,000
 - Wedding decoration: NT$12,000
 - Wedding photography: NT$22,000+
@@ -191,14 +205,17 @@ def get_ai_reply(user_id, user_message, sender_name):
     try:
         if user_id not in conversation_history:
             conversation_history[user_id] = []
+          
+            last_active[user_id] = datetime.now()
+            cleanup_old_conversations() 
 
         conversation_history[user_id].append({
             "role": "user",
             "content": user_message
         })
 
-        if len(conversation_history[user_id]) > 20:
-            conversation_history[user_id] = conversation_history[user_id][-20:]
+        if len(conversation_history[user_id]) > 6:
+            conversation_history[user_id] = conversation_history[user_id][-6:]
 
         response = anthropic_client.messages.create(
             model="claude-opus-4-5",
@@ -225,7 +242,7 @@ def get_ai_reply(user_id, user_message, sender_name):
 
     except Exception as e:
         logging.error("AI reply failed: " + str(e))
-        return "感謝您的訊息！我們的顧問會盡快與您聯繫"
+        return "感謝您的訊息！我們會安排專人盡快與您聯繫"
 
 @app.route("/callback", methods=["POST"])
 def callback():
