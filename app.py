@@ -79,14 +79,43 @@ To view the full wedding menu, tell customers to type: "wedding menu"
 [Reply Rules]
 1. Always reply in Traditional Chinese, warm and professional tone
 2. If customer asks about pricing, provide basic info and say detailed quote requires actual needs, ask for contact info and event date
-3. Proactively ask about event type, guest count, and date to recommend suitable hall
+3. Proactively ask about event type, guest count, date, and time (lunch or dinner) to recommend suitable hall
 4. Keep replies concise, under 75 characters
 5. For complex needs, say a specialist will follow up
 6. If customer clearly states wedding or banquet, provide wedding info directly without asking about year-end banquet
 7. If customer clearly states year-end or spring banquet or corporate event, provide corporate info directly without asking about wedding
-8. If customer mentions table count or guest count without specifying event type, ask only ONE question: what type of event is it. Once event type is confirmed, do not ask again and proceed directly to provide relevant information.
-9. If customer is discussing wedding details such as tables, menu, decoration, flowers, or any wedding-related topic, do not ask if it is a year-end banquet or other event type. Stay focused on the wedding topic.
-10. IMPORTANT: Always read the entire conversation history before replying. Never ask for information the customer has already provided earlier in the conversation.
+8. If customer mentions table count or guest count without specifying event type, ask only ONE question: what type of event is it. Once confirmed, do not ask again.
+9. Stay focused on the topic the customer is discussing. Do not switch topics.
+10. IMPORTANT: Always read the entire conversation history before replying. Never ask for information the customer has already provided.
+11. When customer says goodbye, thank you, or indicates end of conversation, generate a summary in this EXACT format:
+
+[SUMMARY]
+客人名稱: (name or unknown)
+活動類型: (wedding/year-end banquet/spring banquet/corporate/other)
+活動日期: (date or unknown)
+時段: (午宴/晚宴/unknown)
+桌數: (number or unknown)
+廳別建議: (hall name or unknown)
+其他需求: (special requests or none)
+狀態: 待跟進
+[END_SUMMARY]
+
+Then after the summary block, add a friendly confirmation message to the customer in Traditional Chinese repeating the key info.
+"""
+
+SUMMARY_PROMPT = """
+Based on this conversation, extract customer inquiry information and return ONLY a JSON object with these fields:
+{
+  "customer_name": "name or unknown",
+  "event_type": "wedding/year-end banquet/spring banquet/corporate/other",
+  "event_date": "date or unknown",
+  "time_slot": "午宴/晚宴/unknown",
+  "tables": "number or unknown",
+  "hall_suggestion": "hall name or unknown",
+  "other_requests": "special requests or none",
+  "status": "待跟進"
+}
+Return ONLY the JSON, no other text.
 """
 
 def get_sheets_service():
@@ -111,7 +140,54 @@ def log_to_sheets(timestamp, group_name, sender, message, msg_type):
     except Exception as e:
         logging.error("Sheet write failed: " + str(e))
 
-def get_ai_reply(user_id, user_message):
+def save_summary_to_sheets(summary_data):
+    try:
+        service = get_sheets_service()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        values = [[
+            timestamp,
+            summary_data.get("customer_name", "unknown"),
+            summary_data.get("event_type", "unknown"),
+            summary_data.get("event_date", "unknown"),
+            summary_data.get("time_slot", "unknown"),
+            summary_data.get("tables", "unknown"),
+            summary_data.get("hall_suggestion", "unknown"),
+            summary_data.get("other_requests", "none"),
+            summary_data.get("status", "待跟進")
+        ]]
+        service.spreadsheets().values().append(
+            spreadsheetId=SPREADSHEET_ID,
+            range="客戶摘要!A:I",
+            valueInputOption="RAW",
+            body={"values": values}
+        ).execute()
+        logging.info("Summary saved successfully")
+    except Exception as e:
+        logging.error("Summary save failed: " + str(e))
+
+def extract_summary(conversation):
+    try:
+        messages = conversation + [{
+            "role": "user",
+            "content": SUMMARY_PROMPT
+        }]
+        response = anthropic_client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=500,
+            messages=messages
+        )
+        raw = response.content[0].text.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(raw)
+    except Exception as e:
+        logging.error("Summary extraction failed: " + str(e))
+        return None
+
+def is_ending_message(message):
+    ending_keywords = ["謝謝", "感謝", "再見", "掰掰", "結束", "好的謝謝", "謝謝你", "謝謝您", "了解謝謝", "OK謝謝", "ok謝謝"]
+    return any(keyword in message for keyword in ending_keywords)
+
+def get_ai_reply(user_id, user_message, sender_name):
     try:
         if user_id not in conversation_history:
             conversation_history[user_id] = []
@@ -137,6 +213,13 @@ def get_ai_reply(user_id, user_message):
             "role": "assistant",
             "content": reply
         })
+
+        if is_ending_message(user_message):
+            summary_data = extract_summary(conversation_history[user_id])
+            if summary_data:
+                summary_data["customer_name"] = sender_name
+                save_summary_to_sheets(summary_data)
+            conversation_history[user_id] = []
 
         return reply
 
@@ -183,7 +266,7 @@ def handle_message(event):
     log_to_sheets(timestamp, group_name, sender_name, user_message, "text")
 
     if user_message.startswith("@") or event.source.type != "group":
-        reply = get_ai_reply(sender, user_message)
+        reply = get_ai_reply(sender, user_message, sender_name)
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=reply)
