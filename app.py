@@ -18,14 +18,16 @@ handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
 anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
 
+conversation_history = {}
+
 SYSTEM_PROMPT = """
 You are a professional consultant AI assistant for Victoria Banquet Hall. Your name is Lia.
 Please always reply in Traditional Chinese with a warm and professional tone.
 
 [Venue Information]
-- 3F Victoria Hall: max 30 tables, minimum spend NT$230,000
-- 3F Lia Hall: max 36 tables, minimum spend NT$230,000
-- 1F Kelly Hall: max 75 tables, minimum spend NT$450,000
+- 3F Victoria Hall: max 30 tables
+- 3F Lia Hall: max 36 tables
+- 1F Kelly Hall: max 75 tables
 - 5F VIP Hall (for corporate events)
 - Parking: 400 free VIP parking spaces behind the banquet hall
 
@@ -84,6 +86,7 @@ To view the full wedding menu, tell customers to type: "wedding menu"
 7. If customer clearly states year-end or spring banquet or corporate event, provide corporate info directly without asking about wedding
 8. If customer mentions table count or guest count without specifying event type, ask only ONE question: what type of event is it. Once event type is confirmed, do not ask again and proceed directly to provide relevant information.
 9. If customer is discussing wedding details such as tables, menu, decoration, flowers, or any wedding-related topic, do not ask if it is a year-end banquet or other event type. Stay focused on the wedding topic.
+10. IMPORTANT: Always read the entire conversation history before replying. Never ask for information the customer has already provided earlier in the conversation.
 """
 
 def get_sheets_service():
@@ -108,15 +111,35 @@ def log_to_sheets(timestamp, group_name, sender, message, msg_type):
     except Exception as e:
         logging.error("Sheet write failed: " + str(e))
 
-def get_ai_reply(user_message):
+def get_ai_reply(user_id, user_message):
     try:
+        if user_id not in conversation_history:
+            conversation_history[user_id] = []
+
+        conversation_history[user_id].append({
+            "role": "user",
+            "content": user_message
+        })
+
+        if len(conversation_history[user_id]) > 20:
+            conversation_history[user_id] = conversation_history[user_id][-20:]
+
         response = anthropic_client.messages.create(
             model="claude-opus-4-5",
             max_tokens=300,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}]
+            messages=conversation_history[user_id]
         )
-        return response.content[0].text
+
+        reply = response.content[0].text
+
+        conversation_history[user_id].append({
+            "role": "assistant",
+            "content": reply
+        })
+
+        return reply
+
     except Exception as e:
         logging.error("AI reply failed: " + str(e))
         return "感謝您的訊息！我們的顧問會盡快與您聯繫"
@@ -160,7 +183,7 @@ def handle_message(event):
     log_to_sheets(timestamp, group_name, sender_name, user_message, "text")
 
     if user_message.startswith("@") or event.source.type != "group":
-        reply = get_ai_reply(user_message)
+        reply = get_ai_reply(sender, user_message)
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=reply)
