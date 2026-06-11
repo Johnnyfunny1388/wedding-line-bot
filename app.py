@@ -61,7 +61,12 @@ def init_google_sheet():
         )
         return
     try:
-        gc = gspread.service_account_from_dict(json.loads(sa_json))
+        sa_info = json.loads(sa_json)
+        logger.info(
+            "Google Sheets 使用服務帳戶：%s（此 email 必須是試算表的編輯者）",
+            sa_info.get("client_email"),
+        )
+        gc = gspread.service_account_from_dict(sa_info)
         _worksheet = gc.open_by_key(sheets_id).sheet1
         rows = _worksheet.get_all_values()
         if not rows:
