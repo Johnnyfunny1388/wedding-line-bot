@@ -45,7 +45,7 @@ DRIVE_FOLDER_ID = _extract_id(
     os.environ.get("DRIVE_FOLDER_ID", "17wp3xo9jDoeSqjuTWgcn_8OcqaAwn4pf")
 )
 MACHINE_SHEET_ID = _extract_id(os.environ.get("MACHINE_SHEET_ID", ""))
-ADMIN_LINE_USER_ID = os.environ.get("ADMIN_LINE_USER_ID", "")
+ADMIN_LINE_USER_ID = os.environ.get("ADMIN_LINE_USER_ID", "").strip().strip("'\"")
 
 SYNC_INTERVAL_SECONDS = 3600
 REMINDER_HOUR_TAIPEI = 20
