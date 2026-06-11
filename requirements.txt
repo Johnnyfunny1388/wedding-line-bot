@@ -4,3 +4,4 @@ line-bot-sdk
 anthropic
 gspread
 google-auth
+openpyxl

@@ -12,6 +12,8 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import anthropic
 import gspread
 
+import booking_sync
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -341,6 +343,18 @@ def handle_message(event):
     if not sender:
         return
 
+    # 管理者指令：傳「同步」立即更新訂席總表
+    if (
+        booking_sync.ADMIN_LINE_USER_ID
+        and sender == booking_sync.ADMIN_LINE_USER_ID
+        and user_message.strip() in ("同步", "sync")
+    ):
+        _, sync_message = booking_sync.run_sync(force=True)
+        line_bot_api.reply_message(
+            event.reply_token, TextSendMessage(text=sync_message)
+        )
+        return
+
     reply = get_ai_reply(sender, user_message)
     try:
         line_bot_api.reply_message(
@@ -357,6 +371,7 @@ def index():
 
 
 init_google_sheet()
+booking_sync.start_scheduler()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
