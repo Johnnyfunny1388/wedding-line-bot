@@ -127,8 +127,11 @@ def run_sync(force=False):
     if creds is None:
         return False, "尚未設定服務帳戶金鑰，無法同步"
 
-    with _lock:
+    if not _lock.acquire(timeout=10):
+        return False, "另一個同步作業正在執行中，請稍候一分鐘再試"
+    try:
         try:
+            logger.info("開始同步 force=%s", force)
             session = AuthorizedSession(creds)
             file_info = _find_latest_xlsx(session)
             if file_info is None:
@@ -137,12 +140,18 @@ def run_sync(force=False):
             if not force and file_info["modifiedTime"] == _last_synced_modified_time:
                 return True, "檔案沒有更新，略過本次同步"
 
+            logger.info("下載檔案：%s", file_info["name"])
             content = _download_file(session, file_info["id"])
             records, issues = parse_workbook(io.BytesIO(content))
             rows = records_to_rows(records)
             closed = sum(1 for r in records if r.get("訂席狀態") == "公休")
+            logger.info("解析完成 %d 筆，開始寫入總表", len(records))
 
             gc = gspread.Client(auth=creds)
+            try:
+                gc.http_client.set_timeout(120)
+            except AttributeError:
+                pass
             spreadsheet = gc.open_by_key(MACHINE_SHEET_ID)
 
             data_ws = _get_or_create_tab(spreadsheet, DATA_TAB)
@@ -185,6 +194,8 @@ def run_sync(force=False):
         except Exception:
             logger.exception("同步失敗")
             return False, "❌ 同步失敗，請查看系統 log"
+    finally:
+        _lock.release()
 
 
 def run_sync_async(notify_user_id):
@@ -233,6 +244,7 @@ def _check_stale_and_remind():
 
 
 def _scheduler_loop():
+    time.sleep(90)  # 等服務啟動穩定後再開始第一次同步
     last_sync_attempt = 0.0
     while True:
         try:
