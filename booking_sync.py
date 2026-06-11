@@ -10,6 +10,7 @@
 """
 import io
 import os
+import re
 import json
 import time
 import logging
@@ -33,10 +34,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-DRIVE_FOLDER_ID = os.environ.get(
-    "DRIVE_FOLDER_ID", "17wp3xo9jDoeSqjuTWgcn_8OcqaAwn4pf"
+def _extract_id(value):
+    """允許環境變數貼完整網址或純 ID。"""
+    value = (value or "").strip().strip("'\"")
+    match = re.search(r"/(?:d|folders)/([A-Za-z0-9_-]+)", value)
+    return match.group(1) if match else value
+
+
+DRIVE_FOLDER_ID = _extract_id(
+    os.environ.get("DRIVE_FOLDER_ID", "17wp3xo9jDoeSqjuTWgcn_8OcqaAwn4pf")
 )
-MACHINE_SHEET_ID = os.environ.get("MACHINE_SHEET_ID", "")
+MACHINE_SHEET_ID = _extract_id(os.environ.get("MACHINE_SHEET_ID", ""))
 ADMIN_LINE_USER_ID = os.environ.get("ADMIN_LINE_USER_ID", "")
 
 SYNC_INTERVAL_SECONDS = 3600
