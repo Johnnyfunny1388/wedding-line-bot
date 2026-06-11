@@ -343,18 +343,31 @@ def handle_message(event):
     if not sender:
         return
 
-    # 管理者指令：傳「同步」立即更新訂席總表（背景執行，完成後推播結果）
-    if (
-        booking_sync.ADMIN_LINE_USER_ID
-        and sender == booking_sync.ADMIN_LINE_USER_ID
-        and user_message.strip() in ("同步", "sync")
-    ):
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="收到，開始同步訂席總表，完成後通知您…"),
-        )
-        booking_sync.run_sync_async(sender)
-        return
+    # 管理者指令
+    if booking_sync.ADMIN_LINE_USER_ID and sender == booking_sync.ADMIN_LINE_USER_ID:
+        command = user_message.strip()
+        if command in ("同步", "sync"):
+            logger.info("管理者觸發手動同步 user=%s", sender)
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="收到，開始同步訂席總表，完成後通知您…"),
+            )
+            booking_sync.run_sync_async(sender)
+            return
+        if command in ("狀態", "status"):
+            logger.info("管理者查詢系統狀態 user=%s", sender)
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=booking_sync.status_report()),
+            )
+            return
+        if command in ("推播測試", "push test"):
+            logger.info("管理者觸發推播測試 user=%s", sender)
+            line_bot_api.reply_message(
+                event.reply_token, TextSendMessage(text="3 秒後測試主動推播…")
+            )
+            booking_sync.push_test_async(sender)
+            return
 
     reply = get_ai_reply(sender, user_message)
     try:

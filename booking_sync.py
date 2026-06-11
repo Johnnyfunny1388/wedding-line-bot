@@ -118,13 +118,31 @@ def _get_or_create_tab(spreadsheet, title, rows=1000, cols=40):
         return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
 
+def status_report():
+    """回報同步系統的設定狀態（管理者 LINE 傳「狀態」時使用）。"""
+    creds_ok = _load_credentials() is not None
+    lines = [
+        "🔧 同步系統狀態",
+        f"機器版總表 ID：{MACHINE_SHEET_ID[:10] + '…' if MACHINE_SHEET_ID else '❌ 未設定'}",
+        f"Drive 資料夾 ID：{DRIVE_FOLDER_ID[:10]}…",
+        f"管理者 ID：{'✅ 已設定' if ADMIN_LINE_USER_ID else '❌ 未設定'}",
+        f"服務帳戶金鑰：{'✅ 已設定' if creds_ok else '❌ 未設定'}",
+        f"自動排程：{'✅ 運作中' if _scheduler_started else '❌ 未啟動'}",
+        f"上次同步的檔案版本：{_last_synced_modified_time or '（尚未同步過）'}",
+    ]
+    return "\n".join(lines)
+
+
 def run_sync(force=False):
     """執行一次同步。回傳 (success, message)，message 為人看的摘要。"""
     global _last_synced_modified_time
+    logger.info("run_sync 被呼叫 force=%s", force)
     if not MACHINE_SHEET_ID:
+        logger.warning("run_sync 中止：MACHINE_SHEET_ID 未設定")
         return False, "尚未設定 MACHINE_SHEET_ID，同步功能未啟用"
     creds = _load_credentials()
     if creds is None:
+        logger.warning("run_sync 中止：服務帳戶金鑰未設定")
         return False, "尚未設定服務帳戶金鑰，無法同步"
 
     if not _lock.acquire(timeout=10):
@@ -210,6 +228,25 @@ def run_sync_async(notify_user_id):
             )
         except Exception:
             logger.exception("推播同步結果失敗")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def push_test_async(notify_user_id):
+    """測試主動推播功能是否正常（隔離診斷用）。"""
+
+    def _worker():
+        time.sleep(3)
+        logger.info("推播測試：開始推播給 %s", notify_user_id)
+        try:
+            token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+            LineBotApi(token).push_message(
+                notify_user_id,
+                TextSendMessage(text="✅ 主動推播功能正常"),
+            )
+            logger.info("推播測試：成功")
+        except Exception:
+            logger.exception("推播測試：失敗")
 
     threading.Thread(target=_worker, daemon=True).start()
 
