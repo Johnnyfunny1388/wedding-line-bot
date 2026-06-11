@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import logging
@@ -49,6 +50,13 @@ _sheet_row_index = {}   # user_id -> 工作表列號
 _sheet_next_row = 2     # 下一個可用的列號
 
 
+def _extract_sheet_id(value):
+    """允許環境變數貼完整網址或純 ID，並去除頭尾空白與引號。"""
+    value = value.strip().strip("'\"")
+    match = re.search(r"/d/([A-Za-z0-9_-]+)", value)
+    return match.group(1) if match else value
+
+
 def init_google_sheet():
     global _worksheet, _sheet_next_row
     # 同時支援新舊兩組環境變數名稱
@@ -61,11 +69,13 @@ def init_google_sheet():
         )
         return
     try:
+        sheets_id = _extract_sheet_id(sheets_id)
         sa_info = json.loads(sa_json)
         logger.info(
             "Google Sheets 使用服務帳戶：%s（此 email 必須是試算表的編輯者）",
             sa_info.get("client_email"),
         )
+        logger.info("Google Sheets 目標試算表 ID：%s", sheets_id)
         gc = gspread.service_account_from_dict(sa_info)
         _worksheet = gc.open_by_key(sheets_id).sheet1
         rows = _worksheet.get_all_values()
