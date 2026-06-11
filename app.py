@@ -1,34 +1,136 @@
 import os
 import json
+import time
 import logging
+from datetime import datetime, timezone
+
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from anthropic import Anthropic
-from datetime import datetime
+import anthropic
+import gspread
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("ria")
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
 line_bot_api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
-anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+# retry 由下方 call_claude_with_retry 自行控制（固定間隔 2 秒、最多 3 次），
+# 關閉 SDK 內建的自動重試以免兩層重試疊加
+anthropic_client = anthropic.Anthropic(
+    api_key=os.environ.get("ANTHROPIC_API_KEY"),
+    max_retries=0,
+)
+
+MAX_HISTORY_MESSAGES = 6        # 每位使用者保留最近 6 則訊息（3 組問答）
+HISTORY_TTL_SECONDS = 3600      # 超過 1 小時沒互動視為對話結束
+CLAUDE_MAX_RETRIES = 3
+CLAUDE_RETRY_DELAY_SECONDS = 2
 
 conversation_history = {}
 last_active = {}
 
+# ---------------------------------------------------------------------------
+# Google Sheets 持久化
+# 欄位結構：A=user_id, B=history(JSON), C=updated_at(ISO 8601, UTC)
+# 每個 user_id 一列；server 重啟時從 Sheets 還原未過期的對話
+# ---------------------------------------------------------------------------
+SHEET_HEADER = ["user_id", "history", "updated_at"]
+
+_worksheet = None
+_sheet_row_index = {}   # user_id -> 工作表列號
+_sheet_next_row = 2     # 下一個可用的列號
+
+
+def init_google_sheet():
+    global _worksheet, _sheet_next_row
+    # 同時支援新舊兩組環境變數名稱
+    sheets_id = os.environ.get("GOOGLE_SHEETS_ID") or os.environ.get("SPREADSHEET_ID")
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or os.environ.get("GOOGLE_CREDENTIALS")
+    if not sheets_id or not sa_json:
+        logger.warning(
+            "GOOGLE_SHEETS_ID/SPREADSHEET_ID 或 GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_CREDENTIALS 未設定，"
+            "對話歷史僅保存在記憶體，重啟後會遺失"
+        )
+        return
+    try:
+        gc = gspread.service_account_from_dict(json.loads(sa_json))
+        _worksheet = gc.open_by_key(sheets_id).sheet1
+        rows = _worksheet.get_all_values()
+        if not rows:
+            _worksheet.append_row(SHEET_HEADER)
+            rows = [SHEET_HEADER]
+        _sheet_next_row = len(rows) + 1
+        _restore_histories(rows[1:])
+        logger.info(
+            "Google Sheets 連線成功，還原 %d 位使用者的對話歷史",
+            len(conversation_history),
+        )
+    except Exception:
+        _worksheet = None
+        logger.exception("Google Sheets 初始化失敗，改用記憶體模式")
+
+
+def _restore_histories(data_rows):
+    now = datetime.now(timezone.utc)
+    for i, row in enumerate(data_rows, start=2):
+        if not row or not row[0]:
+            continue
+        user_id = row[0]
+        _sheet_row_index[user_id] = i
+        try:
+            updated_at = datetime.fromisoformat(row[2])
+            if (now - updated_at).total_seconds() > HISTORY_TTL_SECONDS:
+                continue  # 過期的對話不還原
+            history = json.loads(row[1]) if row[1] else []
+        except (IndexError, ValueError, json.JSONDecodeError):
+            logger.warning("user=%s 的 Sheets 資料格式異常，略過還原", user_id)
+            continue
+        if history:
+            conversation_history[user_id] = history
+            last_active[user_id] = updated_at
+
+
+def save_history_to_sheet(user_id):
+    """每次對話後即時把該使用者的歷史寫回 Google Sheets。
+
+    寫入失敗只記 log，不影響回覆客人。
+    """
+    global _sheet_next_row
+    if _worksheet is None:
+        return
+    history_json = json.dumps(
+        conversation_history.get(user_id, []), ensure_ascii=False
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        row = _sheet_row_index.get(user_id)
+        if row is None:
+            row = _sheet_next_row
+            _sheet_next_row += 1
+            _sheet_row_index[user_id] = row
+        _worksheet.update(
+            values=[[user_id, history_json, now_iso]],
+            range_name=f"A{row}:C{row}",
+        )
+    except Exception:
+        logger.exception("寫入 Google Sheets 失敗 user=%s", user_id)
+
+
 def cleanup_old_conversations():
-    current_time = datetime.now()
-    inactive_users = []
-    for user_id, last_time in last_active.items():
-        diff = (current_time - last_time).seconds
-        if diff > 3600:
-            inactive_users.append(user_id)
-    for user_id in inactive_users:
-        if user_id in conversation_history:
-            del conversation_history[user_id]
-        del last_active[user_id]
+    now = datetime.now(timezone.utc)
+    for user_id in list(last_active.keys()):
+        if (now - last_active[user_id]).total_seconds() > HISTORY_TTL_SECONDS:
+            conversation_history.pop(user_id, None)
+            del last_active[user_id]
+
 
 SYSTEM_PROMPT = """
 You are a professional consultant AI assistant for Victoria Banquet Hall. Your name is Ria.
@@ -116,74 +218,130 @@ To view the full wedding menu, tell customers to type: "wedding menu"
 我們會盡快安排專人與您聯繫！
 """
 
-def get_ai_reply(user_id, user_message):
-    try:
-        if user_id not in conversation_history:
-            conversation_history[user_id] = []
 
-        last_active[user_id] = datetime.now()
-        cleanup_old_conversations()
+def trim_history(history):
+    """保留最近 6 則，並確保第一則是 user（Claude API 要求）。"""
+    if len(history) > MAX_HISTORY_MESSAGES:
+        del history[:-MAX_HISTORY_MESSAGES]
+    while history and history[0]["role"] == "assistant":
+        del history[0]
 
-        conversation_history[user_id].append({
-            "role": "user",
-            "content": user_message
-        })
 
-        if len(conversation_history[user_id]) > 6:
-            conversation_history[user_id] = conversation_history[user_id][-6:]
-
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=300,
-            system=SYSTEM_PROMPT,
-            messages=conversation_history[user_id]
+def call_claude_with_retry(messages):
+    """呼叫 Claude API，可重試的錯誤最多重試 3 次，每次間隔 2 秒。"""
+    last_error = None
+    for attempt in range(1, CLAUDE_MAX_RETRIES + 1):
+        try:
+            return anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=300,
+                system=SYSTEM_PROMPT,
+                messages=messages,
+            )
+        except (anthropic.APIConnectionError, anthropic.RateLimitError) as e:
+            last_error = e
+        except anthropic.APIStatusError as e:
+            if e.status_code < 500:
+                raise  # 4xx 是請求本身的問題，重試也不會成功
+            last_error = e
+        logger.warning(
+            "Claude API 第 %d/%d 次呼叫失敗：%s",
+            attempt, CLAUDE_MAX_RETRIES, last_error,
         )
+        if attempt < CLAUDE_MAX_RETRIES:
+            time.sleep(CLAUDE_RETRY_DELAY_SECONDS)
+    raise last_error
 
+
+ENDING_KEYWORDS = ["謝謝", "感謝", "再見", "掰掰", "結束", "謝謝你", "謝謝您"]
+
+
+def get_ai_reply(user_id, user_message):
+    start = time.monotonic()
+    try:
+        cleanup_old_conversations()
+        history = conversation_history.setdefault(user_id, [])
+        last_active[user_id] = datetime.now(timezone.utc)
+
+        history.append({"role": "user", "content": user_message})
+        trim_history(history)
+
+        response = call_claude_with_retry(history)
         reply = response.content[0].text
 
-        conversation_history[user_id].append({
-            "role": "assistant",
-            "content": reply
-        })
+        history.append({"role": "assistant", "content": reply})
+        trim_history(history)
 
-        ending_keywords = ["謝謝", "感謝", "再見", "掰掰", "結束", "謝謝你", "謝謝您"]
-        if any(keyword in user_message for keyword in ending_keywords):
+        if any(keyword in user_message for keyword in ENDING_KEYWORDS):
             conversation_history[user_id] = []
 
+        save_history_to_sheet(user_id)
+
+        logger.info(
+            "user=%s msg_len=%d reply_len=%d elapsed=%.2fs",
+            user_id, len(user_message), len(reply), time.monotonic() - start,
+        )
         return reply + "\n\n— 以上由AI助理利亞回覆 👩‍💼"
 
-    except Exception as e:
-        logging.error("AI reply failed: " + str(e))
+    except Exception:
+        logger.exception(
+            "AI 回覆失敗 user=%s msg_len=%d elapsed=%.2fs",
+            user_id, len(user_message), time.monotonic() - start,
+        )
         return "感謝您的訊息！我們會盡快請專人與您聯繫"
+
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature")
+    if not signature:
+        abort(400)
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        logger.warning("LINE 簽章驗證失敗")
         abort(400)
     return "OK"
+
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
-    sender = event.source.user_id
+    source = event.source
 
-    if event.source.type == "group":
+    if source.type in ("group", "room"):
         if not user_message.startswith("@利亞"):
             return
-    
-    reply = get_ai_reply(sender, user_message)
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply)
+        stripped = user_message[len("@利亞"):].strip()
+        if stripped:
+            user_message = stripped
+
+    # 群組/聊天室中 user_id 可能拿不到，退而用群組 ID 當對話 key
+    sender = (
+        source.user_id
+        or getattr(source, "group_id", None)
+        or getattr(source, "room_id", None)
     )
+    if not sender:
+        return
+
+    reply = get_ai_reply(sender, user_message)
+    try:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply),
+        )
+    except LineBotApiError:
+        logger.exception("LINE 回覆失敗 user=%s", sender)
+
 
 @app.route("/")
 def index():
     return "Wedding Bot is running"
+
+
+init_google_sheet()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
