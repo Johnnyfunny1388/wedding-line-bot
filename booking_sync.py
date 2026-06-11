@@ -85,7 +85,9 @@ def _find_latest_xlsx(session):
         "pageSize": 5,
         "fields": "files(id,name,modifiedTime)",
     }
-    resp = session.get("https://www.googleapis.com/drive/v3/files", params=params)
+    resp = session.get(
+        "https://www.googleapis.com/drive/v3/files", params=params, timeout=30
+    )
     resp.raise_for_status()
     files = resp.json().get("files", [])
     return files[0] if files else None
@@ -95,6 +97,7 @@ def _download_file(session, file_id):
     resp = session.get(
         f"https://www.googleapis.com/drive/v3/files/{file_id}",
         params={"alt": "media"},
+        timeout=120,
     )
     resp.raise_for_status()
     return resp.content
@@ -174,6 +177,22 @@ def run_sync(force=False):
         except Exception:
             logger.exception("同步失敗")
             return False, "❌ 同步失敗，請查看系統 log"
+
+
+def run_sync_async(notify_user_id):
+    """背景執行同步，完成後把結果推播給指定使用者（避免卡住 LINE webhook）。"""
+
+    def _worker():
+        _, message = run_sync(force=True)
+        try:
+            token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+            LineBotApi(token).push_message(
+                notify_user_id, TextSendMessage(text=message)
+            )
+        except Exception:
+            logger.exception("推播同步結果失敗")
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _check_stale_and_remind():

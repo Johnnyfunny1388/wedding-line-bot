@@ -343,16 +343,17 @@ def handle_message(event):
     if not sender:
         return
 
-    # 管理者指令：傳「同步」立即更新訂席總表
+    # 管理者指令：傳「同步」立即更新訂席總表（背景執行，完成後推播結果）
     if (
         booking_sync.ADMIN_LINE_USER_ID
         and sender == booking_sync.ADMIN_LINE_USER_ID
         and user_message.strip() in ("同步", "sync")
     ):
-        _, sync_message = booking_sync.run_sync(force=True)
         line_bot_api.reply_message(
-            event.reply_token, TextSendMessage(text=sync_message)
+            event.reply_token,
+            TextSendMessage(text="收到，開始同步訂席總表，完成後通知您…"),
         )
+        booking_sync.run_sync_async(sender)
         return
 
     reply = get_ai_reply(sender, user_message)
