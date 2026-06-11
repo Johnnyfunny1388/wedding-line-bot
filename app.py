@@ -133,7 +133,7 @@ def get_ai_reply(user_id, user_message):
             conversation_history[user_id] = conversation_history[user_id][-6:]
 
         response = anthropic_client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=300,
             system=SYSTEM_PROMPT,
             messages=conversation_history[user_id]
