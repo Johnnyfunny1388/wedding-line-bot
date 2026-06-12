@@ -48,7 +48,9 @@ MACHINE_SHEET_ID = _extract_id(os.environ.get("MACHINE_SHEET_ID", ""))
 ADMIN_LINE_USER_ID = os.environ.get("ADMIN_LINE_USER_ID", "").strip().strip("'\"")
 
 SYNC_INTERVAL_SECONDS = 3600
-REMINDER_HOUR_TAIPEI = 20
+# 公司電腦每天 23:30 自動上傳；隔天早上 9 點檢查檔案是否超過 24 小時沒更新
+REMINDER_HOUR_TAIPEI = 9
+STALE_THRESHOLD_HOURS = 24
 
 DATA_TAB = "訂席總表"
 REPORT_TAB = "轉換報告"
@@ -252,7 +254,7 @@ def push_test_async(notify_user_id):
 
 
 def _check_stale_and_remind():
-    """台灣時間每天 20:00 檢查當天是否有上傳新檔。"""
+    """台灣時間每天早上檢查檔案是否太久沒更新（自動上傳失敗的警報）。"""
     global _last_reminder_date
     now = datetime.now(TAIPEI_TZ)
     if now.hour != REMINDER_HOUR_TAIPEI or _last_reminder_date == now.date():
@@ -270,9 +272,11 @@ def _check_stale_and_remind():
         modified = datetime.fromisoformat(
             file_info["modifiedTime"].replace("Z", "+00:00")
         ).astimezone(TAIPEI_TZ)
-        if modified.date() < now.date():
+        age_hours = (now - modified).total_seconds() / 3600
+        if age_hours > STALE_THRESHOLD_HOURS:
             _notify_admin(
-                f"⚠️ 提醒：今天還沒上傳新的訂席資料表\n"
+                f"⚠️ 提醒：訂席資料表已超過 {int(age_hours)} 小時沒更新，"
+                f"昨晚的自動上傳可能失敗了\n"
                 f"目前最新檔案：{file_info['name']}\n"
                 f"最後更新：{modified.strftime('%Y-%m-%d %H:%M')}"
             )
