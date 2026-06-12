@@ -163,7 +163,7 @@ Please always reply in Traditional Chinese with a warm and professional tone.
 [Venue Information]
 - 3F Victoria Hall: max 30 tables
 - 3F Lia Hall: max 36 tables
-- 1F Kelly Hall: max 50 tables
+- 1F Kelly Hall: max 75 tables
 - 5F VIP Hall (for corporate events)
 - Parking: 400 free VIP parking spaces behind the banquet hall
 - Name: Victoria Banquet Hall (維多利亞宴會館)
