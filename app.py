@@ -3,7 +3,7 @@ import re
 import json
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -13,6 +13,7 @@ import anthropic
 import gspread
 
 import booking_sync
+import availability
 
 logging.basicConfig(
     level=logging.INFO,
@@ -223,6 +224,18 @@ To view the full wedding menu, tell customers to type: "wedding menu"
 12. Never ask for phone number or LINE ID more than once in the same conversation. If customer has already provided contact info, do not ask again.
 13. This Victoria Banquet Hall is located in Pingtung City at No. 208, Section 3, Ruiguang Road. It is NOT the Victoria Banquet Hall in Taipei. Always make this clear if customer asks about location.
 
+[Schedule Lookup Rules]
+You have a tool "query_schedule" to look up booking status for a specific date.
+1. Use it when the customer asks about availability of a specific date (e.g. 某天還有沒有場地/廳/檔期).
+2. Only state facts the tool returns. NEVER guess or infer availability beyond the tool result.
+3. The tool returns which halls are ALREADY BOOKED and whether the venue is closed that day. Halls not listed MAY be available — phrase this as 「目前看起來尚有空檔」, never as a guarantee.
+4. Hall name mapping: 「3F 維多廳」=3F 維多利亞廳(max 30 tables)、「3F 利亞廳」(max 36 tables)、「1F 凱莉廳」(max 50 tables)、「5F VIP1/VIP2/VIP3」=5F VIP包廂(corporate events).
+5. EVERY schedule answer MUST end with:「實際檔期仍需由專人為您做最終確認喔！」
+6. If the tool fails, returns an error, or the date is out of range: say a specialist will confirm the schedule. Do NOT guess.
+7. NEVER reveal other customers' event names, host names, or any booking details beyond 時段/廳別 occupancy.
+8. If the customer gives a date without a year, assume the nearest upcoming occurrence based on today's date.
+9. Do not call the tool more than 4 times for one customer message; for broad questions like 「整個六月有哪些週六有空」, ask the customer to narrow down to specific dates first.
+
 感謝您的詢問！以下是您的需求摘要：
 
 活動類型：
@@ -244,6 +257,55 @@ def trim_history(history):
         del history[0]
 
 
+SCHEDULE_TOOL = {
+    "name": "query_schedule",
+    "description": (
+        "查詢宴會館某一天的訂席狀況。回傳該日是否公休、已有哪些時段與廳別被預訂。"
+        "當客人詢問特定日期是否還有場地、檔期、能否訂位時呼叫。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "date": {
+                "type": "string",
+                "description": "要查詢的日期，格式 YYYY-MM-DD，例如 2026-06-13",
+            }
+        },
+        "required": ["date"],
+    },
+}
+
+
+def _today_line():
+    now = datetime.now(timezone(timedelta(hours=8)))
+    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    return f"\n[Today]\n今天日期（台灣）：{now.strftime('%Y-%m-%d')}（星期{weekdays[now.weekday()]}）"
+
+
+def _serialize_content(content):
+    """把 SDK 回傳的內容區塊轉成可存史、可回傳的純 dict。"""
+    blocks = []
+    for block in content:
+        if block.type == "text":
+            blocks.append({"type": "text", "text": block.text})
+        elif block.type == "tool_use":
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                }
+            )
+    return blocks
+
+
+def _execute_tool(name, tool_input):
+    if name == "query_schedule":
+        return availability.query_date(tool_input.get("date", ""))
+    return {"錯誤": f"未知的工具：{name}"}
+
+
 def call_claude_with_retry(messages):
     """呼叫 Claude API，可重試的錯誤最多重試 3 次，每次間隔 2 秒。"""
     last_error = None
@@ -251,8 +313,9 @@ def call_claude_with_retry(messages):
         try:
             return anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=300,
-                system=SYSTEM_PROMPT,
+                max_tokens=500,
+                system=SYSTEM_PROMPT + _today_line(),
+                tools=[SCHEDULE_TOOL],
                 messages=messages,
             )
         except (anthropic.APIConnectionError, anthropic.RateLimitError) as e:
@@ -283,8 +346,42 @@ def get_ai_reply(user_id, user_message):
         history.append({"role": "user", "content": user_message})
         trim_history(history)
 
-        response = call_claude_with_retry(history)
-        reply = response.content[0].text
+        # 工具回合（查檔期）用獨立的工作清單，只把最終文字回覆存進對話歷史
+        working_messages = list(history)
+        response = call_claude_with_retry(working_messages)
+        tool_rounds = 0
+        while response.stop_reason == "tool_use" and tool_rounds < 3:
+            tool_rounds += 1
+            working_messages.append(
+                {"role": "assistant", "content": _serialize_content(response.content)}
+            )
+            tool_results = []
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+                logger.info(
+                    "工具呼叫 user=%s tool=%s input=%s",
+                    user_id, block.name, json.dumps(block.input, ensure_ascii=False),
+                )
+                try:
+                    result = _execute_tool(block.name, block.input)
+                except Exception:
+                    logger.exception("工具執行失敗 tool=%s", block.name)
+                    result = {"錯誤": "查詢系統暫時無法使用，請改請專人確認檔期"}
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    }
+                )
+            working_messages.append({"role": "user", "content": tool_results})
+            response = call_claude_with_retry(working_messages)
+
+        reply = next(
+            (block.text for block in response.content if block.type == "text"),
+            "感謝您的詢問！詳細資訊由專人為您確認",
+        )
 
         history.append({"role": "assistant", "content": reply})
         trim_history(history)
