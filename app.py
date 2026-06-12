@@ -39,6 +39,7 @@ CLAUDE_MAX_RETRIES = 3
 CLAUDE_RETRY_DELAY_SECONDS = 2
 
 conversation_history = {}
+previous_history = {}   # 已結束（閒置逾時）的上一段對話，當作客人的長期記憶
 last_active = {}
 
 # ---------------------------------------------------------------------------
@@ -105,13 +106,15 @@ def _restore_histories(data_rows):
         _sheet_row_index[user_id] = i
         try:
             updated_at = datetime.fromisoformat(row[2])
-            if (now - updated_at).total_seconds() > HISTORY_TTL_SECONDS:
-                continue  # 過期的對話不還原
             history = json.loads(row[1]) if row[1] else []
         except (IndexError, ValueError, json.JSONDecodeError):
             logger.warning("user=%s 的 Sheets 資料格式異常，略過還原", user_id)
             continue
-        if history:
+        if not history:
+            continue
+        if (now - updated_at).total_seconds() > HISTORY_TTL_SECONDS:
+            previous_history[user_id] = history  # 過期對話 → 長期記憶
+        else:
             conversation_history[user_id] = history
             last_active[user_id] = updated_at
 
@@ -143,10 +146,13 @@ def save_history_to_sheet(user_id):
 
 
 def cleanup_old_conversations():
+    """閒置逾時的對話不再丟棄，改轉入 previous_history 當長期記憶。"""
     now = datetime.now(timezone.utc)
     for user_id in list(last_active.keys()):
         if (now - last_active[user_id]).total_seconds() > HISTORY_TTL_SECONDS:
-            conversation_history.pop(user_id, None)
+            history = conversation_history.pop(user_id, None)
+            if history:
+                previous_history[user_id] = history
             del last_active[user_id]
 
 
@@ -307,7 +313,31 @@ def _execute_tool(name, tool_input):
     return {"錯誤": f"未知的工具：{name}"}
 
 
-def call_claude_with_retry(messages):
+def _previous_context_note(user_id):
+    """客人先前對話的長期記憶，附加進 system prompt。"""
+    prev = previous_history.get(user_id)
+    if not prev:
+        return ""
+    lines = []
+    for m in prev[-MAX_HISTORY_MESSAGES:]:
+        speaker = "客人" if m.get("role") == "user" else "利亞"
+        content = str(m.get("content", ""))[:300]
+        lines.append(f"{speaker}：{content}")
+    return (
+        "\n[Previous Inquiry Context]\n"
+        "此客人先前曾詢問過，以下是上次對話的最後紀錄（供延續服務參考）：\n"
+        + "\n".join(lines)
+        + "\n\nRules for using this context:\n"
+        "1. NEVER tell the customer you have no record of previous conversations.\n"
+        "2. Do NOT ask again for information already provided above (name, phone, "
+        "event type, date, table count).\n"
+        "3. If the customer continues the previous topic, continue naturally, "
+        "e.g. acknowledge their earlier inquiry.\n"
+        "4. If the customer starts a brand-new topic, just serve them normally."
+    )
+
+
+def call_claude_with_retry(messages, system_extra=""):
     """呼叫 Claude API，可重試的錯誤最多重試 3 次，每次間隔 2 秒。"""
     last_error = None
     for attempt in range(1, CLAUDE_MAX_RETRIES + 1):
@@ -315,7 +345,7 @@ def call_claude_with_retry(messages):
             return anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=500,
-                system=SYSTEM_PROMPT + _today_line(),
+                system=SYSTEM_PROMPT + _today_line() + system_extra,
                 tools=[SCHEDULE_TOOL],
                 messages=messages,
             )
@@ -334,9 +364,6 @@ def call_claude_with_retry(messages):
     raise last_error
 
 
-ENDING_KEYWORDS = ["謝謝", "感謝", "再見", "掰掰", "結束", "謝謝你", "謝謝您"]
-
-
 def get_ai_reply(user_id, user_message):
     start = time.monotonic()
     try:
@@ -348,8 +375,9 @@ def get_ai_reply(user_id, user_message):
         trim_history(history)
 
         # 工具回合（查檔期）用獨立的工作清單，只把最終文字回覆存進對話歷史
+        system_extra = _previous_context_note(user_id)
         working_messages = list(history)
-        response = call_claude_with_retry(working_messages)
+        response = call_claude_with_retry(working_messages, system_extra)
         tool_rounds = 0
         while response.stop_reason == "tool_use" and tool_rounds < 3:
             tool_rounds += 1
@@ -377,7 +405,7 @@ def get_ai_reply(user_id, user_message):
                     }
                 )
             working_messages.append({"role": "user", "content": tool_results})
-            response = call_claude_with_retry(working_messages)
+            response = call_claude_with_retry(working_messages, system_extra)
 
         reply = next(
             (block.text for block in response.content if block.type == "text"),
@@ -386,9 +414,6 @@ def get_ai_reply(user_id, user_message):
 
         history.append({"role": "assistant", "content": reply})
         trim_history(history)
-
-        if any(keyword in user_message for keyword in ENDING_KEYWORDS):
-            conversation_history[user_id] = []
 
         save_history_to_sheet(user_id)
 
