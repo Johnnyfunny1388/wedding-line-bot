@@ -160,13 +160,6 @@ def run_sync(force=False):
             if not force and file_info["modifiedTime"] == _last_synced_modified_time:
                 return True, "檔案沒有更新，略過本次同步"
 
-            logger.info("下載檔案：%s", file_info["name"])
-            content = _download_file(session, file_info["id"])
-            records, issues = parse_workbook(io.BytesIO(content))
-            rows = records_to_rows(records)
-            closed = sum(1 for r in records if r.get("訂席狀態") == "公休")
-            logger.info("解析完成 %d 筆，開始寫入總表", len(records))
-
             gc = gspread.Client(auth=creds)
             try:
                 gc.http_client.set_timeout(120)
@@ -174,13 +167,29 @@ def run_sync(force=False):
                 pass
             spreadsheet = gc.open_by_key(MACHINE_SHEET_ID)
 
+            report_ws = _get_or_create_tab(spreadsheet, REPORT_TAB, rows=2000, cols=10)
+            if not report_ws.get_values("A1:A1"):
+                report_ws.update(values=[REPORT_HEADER], range_name="A1")
+
+            # 服務重啟後記憶歸零，靠轉換報告的最後一筆判斷這版檔案是否已同步過，
+            # 避免每次部署/重啟都重複同步、重複通知
+            reported = report_ws.col_values(3)
+            if not force and reported and reported[-1] == file_info["modifiedTime"]:
+                _last_synced_modified_time = file_info["modifiedTime"]
+                logger.info("此檔案版本已同步過，略過（重啟後恢復狀態）")
+                return True, "此檔案版本先前已同步過，略過"
+
+            logger.info("下載檔案：%s", file_info["name"])
+            content = _download_file(session, file_info["id"])
+            records, issues = parse_workbook(io.BytesIO(content))
+            rows = records_to_rows(records)
+            closed = sum(1 for r in records if r.get("訂席狀態") == "公休")
+            logger.info("解析完成 %d 筆，開始寫入總表", len(records))
+
             data_ws = _get_or_create_tab(spreadsheet, DATA_TAB)
             data_ws.clear()
             data_ws.update(values=rows, range_name="A1")
 
-            report_ws = _get_or_create_tab(spreadsheet, REPORT_TAB, rows=2000, cols=10)
-            if not report_ws.get_values("A1:A1"):
-                report_ws.update(values=[REPORT_HEADER], range_name="A1")
             now_taipei = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
             report_ws.append_row(
                 [
@@ -205,7 +214,9 @@ def run_sync(force=False):
                 summary += f"\n⚠️ 格式異常 {len(issues)} 筆：\n" + "\n".join(
                     issues[:5]
                 )
-                _notify_admin(summary)
+                # 手動同步時結果本來就會回覆給管理者，不再重複推播
+                if not force:
+                    _notify_admin(summary)
             logger.info(
                 "同步完成 file=%s records=%d issues=%d",
                 file_info["name"], len(records), len(issues),

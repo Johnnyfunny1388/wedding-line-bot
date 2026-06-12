@@ -15,40 +15,45 @@ MONTH_SHEET_PATTERN = re.compile(r"^\d{1,2}月$")
 HEADER_ROW = 3   # 1-based：欄位標題列
 DATA_START_ROW = 5
 
-# 機器版總表的輸出欄位（轉換後的欄名 → 來源欄名）
+# 機器版總表的輸出欄位（轉換後的欄名 → 可接受的來源欄名清單，支援改名別名）
 # 來源欄名以「移除 ★ 與空白後」比對，順序或位置變動不影響轉換
 COLUMN_MAP = {
-    "宴席日期": "宴席日期",
-    "時段": "時段",
-    "廳別": "廳別",
-    "宴席名稱": "宴席名稱",
-    "場控人員": "場控人員",
-    "進館/會議時間": "進館/會議時間",
-    "開席時間": "開席時間",
-    "葷桌數": "葷桌數",
-    "葷桌金額": "葷桌金額",
-    "素食桌數": "素食桌數",
-    "素食金額": "素食金額",
-    "預備桌": "預備桌",
-    "主桌": "主桌",
-    "主人數": "主人數",
-    "訂金": "訂金",
-    "菜單": "菜單",
-    "確認菜單": "確認菜單",
-    "試菜日期": "試菜日期",
-    "服務費": "服務費",
-    "婚禮佈置": "婚禮佈置",
-    "主持/樂團": "主持/樂團",
-    "聯絡人(主要)": "聯絡人(主要)",
-    "關係": "關係",
-    "電話(主要)": "電話(主要)",
-    "聯絡人(次要)": "聯絡人(次要)",
-    "電話(次要)": "電話(次要)",
-    "承辦人": "承辦人",
-    "訂席狀態": "訂席狀態",
-    "最後聯繫日": "最後聯繫日",
-    "備註": "備註",
+    "宴席日期": ["宴席日期"],
+    "時段": ["時段"],
+    "廳別": ["廳別"],
+    "宴席名稱": ["宴席名稱"],
+    "場控人員": ["場控人員"],
+    "進館/會議時間": ["進館/會議時間"],
+    "開席時間": ["開席時間"],
+    "葷桌數": ["葷桌數"],
+    "葷桌金額": ["葷桌金額"],
+    "素食桌數": ["素食桌數"],
+    "素食金額": ["素食金額", "素桌金額"],
+    "素食套餐": ["素食套餐"],
+    "素套金額": ["素套金額"],
+    "預備桌": ["預備桌"],
+    "主桌": ["主桌"],
+    "主人數": ["主人數"],
+    "訂金": ["訂金"],
+    "菜單": ["菜單"],
+    "確認菜單": ["確認菜單"],
+    "試菜日期": ["試菜日期"],
+    "服務費": ["服務費"],
+    "婚禮佈置": ["婚禮佈置"],
+    "主持/樂團": ["主持/樂團"],
+    "聯絡人(主要)": ["聯絡人(主要)"],
+    "關係": ["關係"],
+    "電話(主要)": ["電話(主要)"],
+    "聯絡人(次要)": ["聯絡人(次要)"],
+    "電話(次要)": ["電話(次要)"],
+    "承辦人": ["承辦人"],
+    "訂席狀態": ["訂席狀態"],
+    "最後聯繫日": ["最後聯繫日"],
+    "備註": ["備註"],
 }
+
+# 這些欄位只有部分分頁有（新版才加的），缺少時不視為格式異常
+OPTIONAL_COLUMNS = {"素食套餐", "素套金額"}
 
 OUTPUT_HEADER = (
     ["來源分頁"]
@@ -100,7 +105,8 @@ def parse_workbook(path_or_buffer):
 
     for sheet_name in wb.sheetnames:
         if not MONTH_SHEET_PATTERN.match(sheet_name):
-            issues.append(f"略過非月份分頁：{sheet_name}")
+            # 非月份分頁（如「除夕」外帶訂單、說明頁）不屬於宴席檔期，
+            # 安靜略過、不列入異常通知
             continue
         ws = wb[sheet_name]
         rows = list(ws.iter_rows(values_only=True))
@@ -110,14 +116,19 @@ def parse_workbook(path_or_buffer):
 
         headers = [_norm_header(v) for v in rows[HEADER_ROW - 1]]
         col_index = {}
-        for out_name, src_name in COLUMN_MAP.items():
-            key = _norm_header(src_name)
-            if key in headers:
-                col_index[out_name] = headers.index(key)
-        missing = [n for n in COLUMN_MAP if n not in col_index]
+        for out_name, aliases in COLUMN_MAP.items():
+            for alias in aliases:
+                key = _norm_header(alias)
+                if key in headers:
+                    col_index[out_name] = headers.index(key)
+                    break
         if "宴席日期" not in col_index:
             issues.append(f"{sheet_name}：找不到「宴席日期」欄，略過整頁")
             continue
+        missing = [
+            n for n in COLUMN_MAP
+            if n not in col_index and n not in OPTIONAL_COLUMNS
+        ]
         if missing:
             issues.append(f"{sheet_name}：缺少欄位 {missing}，該等欄位輸出為空白")
 
