@@ -79,8 +79,27 @@ def _normalize_date(date_str):
     return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
 
 
+def _booked_main_halls(slot_rows):
+    """從該時段的預訂列算出三大廳（凱莉/維多/利亞）哪些已被佔用。"""
+    booked = set()
+    for r in slot_rows:
+        # 「維多利亞廳」先換成「維多」，避免誤判成「利亞廳」
+        hall = r["廳別"].replace("維多利亞", "維多")
+        if "凱莉" in hall:
+            booked.add("凱莉")
+        if "維多" in hall:
+            booked.add("維多")
+        if "利亞" in hall:
+            booked.add("利亞")
+    return booked
+
+
 def query_date(date_str):
-    """查詢單一日期的訂席狀況。回傳 dict（給 Claude 當 tool result）。"""
+    """查詢單一日期的檔期結論。
+
+    刻意只回傳「尚有空檔／已滿檔」的結論，不回傳任何廳別佔用細節，
+    讓 AI 結構上不可能洩漏特定廳別的預訂狀況。
+    """
     normalized = _normalize_date(date_str)
     if normalized is None:
         return {"錯誤": f"日期格式無法解析：{date_str}，請用 YYYY-MM-DD"}
@@ -98,21 +117,15 @@ def query_date(date_str):
     if closed:
         return {"查詢日期": normalized, "公休": True, "說明": "該日會館公休"}
 
-    booked = [
-        {"時段": r["時段"], "廳別": r["廳別"]}
-        for r in day_rows
-        if r["廳別"]
-    ]
-    if not booked:
-        return {
-            "查詢日期": normalized,
-            "公休": False,
-            "已有預訂": [],
-            "說明": "該日期目前查無預訂紀錄，各廳別看起來尚有空檔（仍需專人最終確認）",
-        }
-    return {
-        "查詢日期": normalized,
-        "公休": False,
-        "已有預訂": booked,
-        "說明": "以上時段/廳別已有預訂，未列出的廳別看起來尚有空檔（仍需專人最終確認）",
-    }
+    result = {"查詢日期": normalized, "公休": False}
+    for slot in ("午宴", "晚宴"):
+        slot_rows = [
+            r for r in day_rows if r["廳別"] and r["時段"] in (slot, "全天")
+        ]
+        booked = _booked_main_halls(slot_rows)
+        result[slot] = "三大廳皆已滿檔" if len(booked) >= 3 else "尚有空檔"
+    result["說明"] = (
+        "只能告訴客人「尚有空檔」或「已滿檔、建議考慮其他日期」，"
+        "不可提及任何廳別的預訂狀況；尚有空檔時仍需專人最終確認"
+    )
+    return result
