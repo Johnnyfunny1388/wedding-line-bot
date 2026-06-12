@@ -168,7 +168,7 @@ def run_sync(force=False):
             spreadsheet = gc.open_by_key(MACHINE_SHEET_ID)
 
             report_ws = _get_or_create_tab(spreadsheet, REPORT_TAB, rows=2000, cols=10)
-            if not report_ws.get_values("A1:A1"):
+            if not report_ws.acell("A1").value:
                 report_ws.update(values=[REPORT_HEADER], range_name="A1")
 
             # 服務重啟後記憶歸零，靠轉換報告的最後一筆判斷這版檔案是否已同步過，

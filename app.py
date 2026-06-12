@@ -14,6 +14,7 @@ import gspread
 
 import booking_sync
 import availability
+import lead_capture
 
 logging.basicConfig(
     level=logging.INFO,
@@ -477,6 +478,12 @@ def get_ai_reply(user_id, user_message):
         trim_history(history)
 
         save_history_to_sheet(user_id)
+
+        # 客人道別 → 背景抽取需求資訊，寫入「LINE新詢問」並通知管理者
+        if any(k in user_message for k in lead_capture.ENDING_KEYWORDS):
+            lead_capture.maybe_capture_async(
+                user_id, history, customer_phones.get(user_id, "")
+            )
 
         logger.info(
             "user=%s msg_len=%d reply_len=%d elapsed=%.2fs",
