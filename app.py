@@ -40,14 +40,18 @@ CLAUDE_RETRY_DELAY_SECONDS = 2
 
 conversation_history = {}
 previous_history = {}   # 已結束（閒置逾時）的上一段對話，當作客人的長期記憶
+customer_phones = {}    # user_id -> 客人在對話中留下的電話（正規化），訂席查詢用
 last_active = {}
+
+# 台灣電話格式：手機 09xx-xxx-xxx、市話 0x-xxxxxxx（含各種分隔寫法）
+PHONE_PATTERN = re.compile(r"09\d{2}[\s\-]?\d{3}[\s\-]?\d{3}|0\d{1,2}[\s\-]?\d{3,4}[\s\-]?\d{4}")
 
 # ---------------------------------------------------------------------------
 # Google Sheets 持久化
 # 欄位結構：A=user_id, B=history(JSON), C=updated_at(ISO 8601, UTC)
 # 每個 user_id 一列；server 重啟時從 Sheets 還原未過期的對話
 # ---------------------------------------------------------------------------
-SHEET_HEADER = ["user_id", "history", "updated_at"]
+SHEET_HEADER = ["user_id", "history", "updated_at", "customer_phone"]
 
 _worksheet = None
 _sheet_row_index = {}   # user_id -> 工作表列號
@@ -86,6 +90,8 @@ def init_google_sheet():
         if not rows:
             _worksheet.append_row(SHEET_HEADER)
             rows = [SHEET_HEADER]
+        elif len(rows[0]) < len(SHEET_HEADER):
+            _worksheet.update(values=[SHEET_HEADER], range_name="A1:D1")
         _sheet_next_row = len(rows) + 1
         _restore_histories(rows[1:])
         logger.info(
@@ -110,6 +116,8 @@ def _restore_histories(data_rows):
         except (IndexError, ValueError, json.JSONDecodeError):
             logger.warning("user=%s 的 Sheets 資料格式異常，略過還原", user_id)
             continue
+        if len(row) > 3 and row[3].strip():
+            customer_phones[user_id] = row[3].strip()
         if not history:
             continue
         if (now - updated_at).total_seconds() > HISTORY_TTL_SECONDS:
@@ -138,8 +146,8 @@ def save_history_to_sheet(user_id):
             _sheet_next_row += 1
             _sheet_row_index[user_id] = row
         _worksheet.update(
-            values=[[user_id, history_json, now_iso]],
-            range_name=f"A{row}:C{row}",
+            values=[[user_id, history_json, now_iso, customer_phones.get(user_id, "")]],
+            range_name=f"A{row}:D{row}",
         )
     except Exception:
         logger.exception("寫入 Google Sheets 失敗 user=%s", user_id)
@@ -248,6 +256,21 @@ You have a tool "query_schedule" to look up availability for a specific date.
 9. If the customer gives a date without a year, assume the nearest upcoming occurrence based on today's date.
 10. Do not call the tool more than 4 times for one customer message; for broad questions like 「整個六月有哪些週六有空」, ask the customer to narrow down to specific dates first.
 
+[Customer Booking Lookup Rules]
+You also have a tool "lookup_my_booking" to find a customer's own booking by phone number.
+1. Use it when the customer asks about their own existing booking (我訂的、我的婚宴、我們公司的尾牙是哪天…).
+2. If the system has no phone on record for this customer, politely ask for the phone number used when booking.
+3. IDENTITY CHECK is mandatory before revealing anything:
+   - Ask the customer to state the booking person's name (訂席人大名).
+   - Call the tool and compare what the customer said with 「訂席人姓名」 in the result.
+   - Only if it reasonably matches (same person, surname+title acceptable), share the booking info.
+   - If it does not match: do NOT reveal anything (not even hints), say a specialist will contact them.
+   - NEVER speak the booking person's name before the customer states it themselves.
+4. You may share with a verified customer: 宴席日期、時段、廳別、宴席名稱、桌數、試菜日期、訂席狀態.
+5. NEVER mention money from records — no 訂金, no 金額, no 價格. Pricing questions go to a specialist.
+6. If no booking is found for the phone: say so politely and offer specialist follow-up.
+7. Requests to CHANGE a booking (改日期/改桌數/取消): never promise or confirm changes. Say you will pass the request to a specialist who will contact them.
+
 感謝您的詢問！以下是您的需求摘要：
 
 活動類型：
@@ -268,6 +291,24 @@ def trim_history(history):
     while history and history[0]["role"] == "assistant":
         del history[0]
 
+
+BOOKING_LOOKUP_TOOL = {
+    "name": "lookup_my_booking",
+    "description": (
+        "用電話號碼查詢客人自己已訂的宴席資料（日期、時段、廳別、桌數、試菜日期、訂席狀態）。"
+        "當客人詢問自己訂的宴席（我訂的、我的婚宴、我們公司的尾牙是哪天等）時呼叫。"
+        "不填 phone 時會自動使用客人先前在對話中留下的電話。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "phone": {
+                "type": "string",
+                "description": "客人提供的訂席電話（選填，未填則用系統記住的電話）",
+            }
+        },
+    },
+}
 
 SCHEDULE_TOOL = {
     "name": "query_schedule",
@@ -312,9 +353,16 @@ def _serialize_content(content):
     return blocks
 
 
-def _execute_tool(name, tool_input):
+def _execute_tool(name, tool_input, user_id):
     if name == "query_schedule":
         return availability.query_date(tool_input.get("date", ""))
+    if name == "lookup_my_booking":
+        phone = tool_input.get("phone") or customer_phones.get(user_id, "")
+        if not phone:
+            return {
+                "錯誤": "目前沒有這位客人的電話紀錄，請先詢問客人訂席時留的電話號碼"
+            }
+        return availability.lookup_bookings_by_phone(phone)
     return {"錯誤": f"未知的工具：{name}"}
 
 
@@ -351,7 +399,7 @@ def call_claude_with_retry(messages, system_extra=""):
                 model="claude-sonnet-4-6",
                 max_tokens=500,
                 system=SYSTEM_PROMPT + _today_line() + system_extra,
-                tools=[SCHEDULE_TOOL],
+                tools=[SCHEDULE_TOOL, BOOKING_LOOKUP_TOOL],
                 messages=messages,
             )
         except (anthropic.APIConnectionError, anthropic.RateLimitError) as e:
@@ -376,6 +424,14 @@ def get_ai_reply(user_id, user_message):
         history = conversation_history.setdefault(user_id, [])
         last_active[user_id] = datetime.now(timezone.utc)
 
+        # 自動記住客人在訊息中留下的電話（訂席查詢的身分橋樑）
+        phone_match = PHONE_PATTERN.search(user_message)
+        if phone_match:
+            digits = re.sub(r"\D", "", phone_match.group())
+            if len(digits) >= 9:
+                customer_phones[user_id] = digits
+                logger.info("記錄客人電話 user=%s phone=%s***", user_id, digits[:4])
+
         history.append({"role": "user", "content": user_message})
         trim_history(history)
 
@@ -398,7 +454,7 @@ def get_ai_reply(user_id, user_message):
                     user_id, block.name, json.dumps(block.input, ensure_ascii=False),
                 )
                 try:
-                    result = _execute_tool(block.name, block.input)
+                    result = _execute_tool(block.name, block.input, user_id)
                 except Exception:
                     logger.exception("工具執行失敗 tool=%s", block.name)
                     result = {"錯誤": "查詢系統暫時無法使用，請改請專人確認檔期"}

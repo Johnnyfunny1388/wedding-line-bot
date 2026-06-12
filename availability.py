@@ -63,6 +63,12 @@ def _load_rows():
                     "時段": cell(row, "時段"),
                     "廳別": cell(row, "廳別"),
                     "狀態": cell(row, "訂席狀態"),
+                    "宴席名稱": cell(row, "宴席名稱"),
+                    "桌數": cell(row, "葷桌數"),
+                    "試菜日期": cell(row, "試菜日期"),
+                    "訂席人": cell(row, "聯絡人(主要)"),
+                    "電話1": cell(row, "電話(主要)正規化"),
+                    "電話2": cell(row, "電話(次要)正規化"),
                 }
             )
         _cache["rows"] = rows
@@ -77,6 +83,51 @@ def _normalize_date(date_str):
     if not m:
         return None
     return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
+
+def lookup_bookings_by_phone(phone):
+    """用電話號碼找客人自己的訂席。
+
+    給 Ria 的客人身分查詢工具。刻意不回傳任何金額欄位（訂金、桌價），
+    金額一律由專人處理。「訂席人」欄位僅供 Ria 核對身分用。
+    """
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if len(digits) < 8:
+        return {"錯誤": "電話號碼不完整，請向客人確認完整的訂席電話"}
+
+    rows = _load_rows()
+    matches = [
+        r for r in rows
+        if digits and (r["電話1"] == digits or r["電話2"] == digits)
+    ]
+    if not matches:
+        return {
+            "找到筆數": 0,
+            "說明": "查無此電話的訂席紀錄，請告知客人將由專人協助確認",
+        }
+
+    bookings = []
+    for r in sorted(matches, key=lambda r: r["日期"])[:3]:
+        bookings.append(
+            {
+                "宴席日期": r["日期"],
+                "時段": r["時段"],
+                "廳別": r["廳別"],
+                "宴席名稱": r["宴席名稱"],
+                "桌數": r["桌數"],
+                "試菜日期": r["試菜日期"] or "（未排定）",
+                "訂席狀態": r["狀態"],
+                "訂席人姓名": r["訂席人"],
+            }
+        )
+    return {
+        "找到筆數": len(matches),
+        "訂席資料": bookings,
+        "說明": (
+            "透露任何內容前必須先核對身分：請客人說出訂席人姓名，"
+            "與「訂席人姓名」欄位比對相符才可告知；金額一律不透露"
+        ),
+    }
 
 
 def _booked_main_halls(slot_rows):
