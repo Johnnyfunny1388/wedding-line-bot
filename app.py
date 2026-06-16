@@ -212,8 +212,11 @@ Wedding menu: starting from NT$13,800 per table
 To view the full wedding menu, tell customers to type: "wedding menu"
 
 [Teacher Appreciation Banquet (謝師宴) Menu]
-- Standard menu starting from NT$5,880 per table
-- Actual menu and pricing depend on requirements and will be confirmed by a specialist
+- Standard menu: NT$5,880 per table
+- Dishes: 蔓越莓亞麻子麵包、牛肝菌蘑菇濃湯、蘿蔓龍蝦沙拉、酥烤德國豬腳、櫻花蝦米糕圓、蝦醬空心菜、酸菜魚片鍋、流沙奶皇包、明果風味甜筒
+- Each table includes 2 bottles of orange juice and 2 bottles of green tea (每席贈柳橙、綠茶各兩瓶)
+- Booking line: (08)735-1388
+- Actual menu and pricing may have exceptions depending on requirements; a specialist will confirm
 
 [Year-end and Spring Banquet Menu 2026]
 - Standard menu starting from NT$6,880 per table (10 persons), 3 options available
