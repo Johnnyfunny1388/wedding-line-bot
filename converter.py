@@ -55,10 +55,19 @@ COLUMN_MAP = {
 # 這些欄位只有部分分頁有（新版才加的），缺少時不視為格式異常
 OPTIONAL_COLUMNS = {"素食套餐", "素套金額"}
 
+# 依時段推算月曆用的開始/結束時間（供 AppSheet 行事曆呈現時段長度）
+# 午宴 11:00-16:00、晚宴 17:00-21:00、公休與全天 11:00-20:00；其他時段不給時間
+SLOT_TIMES = {
+    "午宴": ("11:00:00", "16:00:00"),
+    "晚宴": ("17:00:00", "21:00:00"),
+    "公休": ("11:00:00", "20:00:00"),
+    "全天": ("11:00:00", "20:00:00"),
+}
+
 OUTPUT_HEADER = (
     ["來源分頁"]
     + list(COLUMN_MAP.keys())
-    + ["電話(主要)正規化", "電話(次要)正規化"]
+    + ["開始時間", "結束時間", "電話(主要)正規化", "電話(次要)正規化"]
 )
 
 
@@ -151,6 +160,11 @@ def parse_workbook(path_or_buffer):
             # 公休列：時段欄為「公休」
             if record.get("時段") == "公休" and not record.get("訂席狀態"):
                 record["訂席狀態"] = "公休"
+
+            # 依時段推算月曆用的開始/結束時間
+            start_time, end_time = SLOT_TIMES.get(record.get("時段", ""), ("", ""))
+            record["開始時間"] = start_time
+            record["結束時間"] = end_time
 
             record["電話(主要)正規化"] = normalize_phone(record.get("電話(主要)"))
             record["電話(次要)正規化"] = normalize_phone(record.get("電話(次要)"))
