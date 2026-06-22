@@ -230,7 +230,7 @@ Add-on services:
 - Wedding videography: NT$22,000+
 
 Wedding menu: starting from NT$13,800 per table
-To view the full wedding menu, tell customers to type: "wedding menu"
+To view the full wedding menu, tell customers to type: "喜宴菜單"
 
 [Teacher Appreciation Banquet (謝師宴) Menu]
 - Standard menu: NT$5,880 per table
@@ -243,7 +243,7 @@ To view the full wedding menu, tell customers to type: "wedding menu"
 - Standard menu starting from NT$6,880 per table (10 persons), 3 options available
 - NOTE: exceptions to the standard menu/pricing are common — present NT$6,880 as the standard starting price, and add that actual pricing depends on requirements and will be confirmed by a specialist
 - Add NT$120 per table for unlimited orange juice and unsweetened green tea
-- To view the full menu, tell customers to type: "spring banquet menu"
+- To view the full menu, tell customers to type: "春酒菜單"
 
 [Important Notes]
 - Confirm menu and pricing 1 month before wedding
