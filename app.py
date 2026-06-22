@@ -3,6 +3,7 @@ import re
 import json
 import time
 import logging
+import threading
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, request, abort
@@ -36,6 +37,7 @@ anthropic_client = anthropic.Anthropic(
 
 MAX_HISTORY_MESSAGES = 6        # 每位使用者保留最近 6 則訊息（3 組問答）
 HISTORY_TTL_SECONDS = 3600      # 超過 1 小時沒互動視為對話結束
+MAX_PREVIOUS_USERS = 500        # 長期記憶最多保留幾位客人，避免記憶體無上限成長
 CLAUDE_MAX_RETRIES = 3
 CLAUDE_RETRY_DELAY_SECONDS = 2
 
@@ -57,6 +59,7 @@ SHEET_HEADER = ["user_id", "history", "updated_at", "customer_phone"]
 _worksheet = None
 _sheet_row_index = {}   # user_id -> 工作表列號
 _sheet_next_row = 2     # 下一個可用的列號
+_sheet_lock = threading.Lock()  # 序列化列號配置與寫入，避免多執行緒搶到同一列互相覆蓋
 
 
 def _extract_sheet_id(value):
@@ -122,7 +125,7 @@ def _restore_histories(data_rows):
         if not history:
             continue
         if (now - updated_at).total_seconds() > HISTORY_TTL_SECONDS:
-            previous_history[user_id] = history  # 過期對話 → 長期記憶
+            _remember_previous(user_id, history)  # 過期對話 → 長期記憶
         else:
             conversation_history[user_id] = history
             last_active[user_id] = updated_at
@@ -141,17 +144,33 @@ def save_history_to_sheet(user_id):
     )
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        row = _sheet_row_index.get(user_id)
-        if row is None:
-            row = _sheet_next_row
-            _sheet_next_row += 1
-            _sheet_row_index[user_id] = row
-        _worksheet.update(
-            values=[[user_id, history_json, now_iso, customer_phones.get(user_id, "")]],
-            range_name=f"A{row}:D{row}",
-        )
+        # 整段列號配置 + 寫入一起鎖，避免兩個執行緒搶到同一列、或同一客人的
+        # 兩次寫入交錯。低流量下序列化寫入的成本可忽略。
+        with _sheet_lock:
+            row = _sheet_row_index.get(user_id)
+            if row is None:
+                row = _sheet_next_row
+                _sheet_next_row += 1
+                _sheet_row_index[user_id] = row
+            _worksheet.update(
+                values=[[user_id, history_json, now_iso, customer_phones.get(user_id, "")]],
+                range_name=f"A{row}:D{row}",
+            )
     except Exception:
         logger.exception("寫入 Google Sheets 失敗 user=%s", user_id)
+
+
+def _remember_previous(user_id, history):
+    """把一段已結束的對話存進長期記憶，並維持總筆數上限。
+
+    用 dict 的插入順序當作 LRU：重新寫入時先移除舊鍵讓它排到最後，
+    超過上限時淘汰最早寫入（最久沒更新）的客人。
+    """
+    previous_history.pop(user_id, None)
+    previous_history[user_id] = history
+    while len(previous_history) > MAX_PREVIOUS_USERS:
+        oldest = next(iter(previous_history))
+        del previous_history[oldest]
 
 
 def cleanup_old_conversations():
@@ -161,7 +180,7 @@ def cleanup_old_conversations():
         if (now - last_active[user_id]).total_seconds() > HISTORY_TTL_SECONDS:
             history = conversation_history.pop(user_id, None)
             if history:
-                previous_history[user_id] = history
+                _remember_previous(user_id, history)
             del last_active[user_id]
 
 
@@ -518,6 +537,25 @@ def callback():
     return "OK"
 
 
+def _respond_in_background(sender, user_message, reply_token):
+    """背景產生 AI 回覆並回傳給客人。
+
+    AI 回覆可能較慢（多輪工具呼叫 + 重試），若放在 webhook 內同步處理，
+    容易撐爆 LINE 的 reply token 時效，導致客人收不到回覆。
+    這裡先嘗試 reply（免費額度），逾時或失敗再退回 push（會計入推播額度）。
+    """
+    reply = get_ai_reply(sender, user_message)
+    message = TextSendMessage(text=reply)
+    try:
+        line_bot_api.reply_message(reply_token, message)
+    except LineBotApiError as e:
+        logger.warning("reply 失敗，改用 push 補送 user=%s：%s", sender, e)
+        try:
+            line_bot_api.push_message(sender, message)
+        except LineBotApiError:
+            logger.exception("push 也失敗，客人未收到回覆 user=%s", sender)
+
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
@@ -527,8 +565,9 @@ def handle_message(event):
         if not user_message.startswith("@利亞"):
             return
         stripped = user_message[len("@利亞"):].strip()
-        if stripped:
-            user_message = stripped
+        if not stripped:
+            return  # 只 tag 利亞但沒帶問題，無內容可回覆
+        user_message = stripped
 
     # 群組/聊天室中 user_id 可能拿不到，退而用群組 ID 當對話 key
     sender = (
@@ -539,7 +578,7 @@ def handle_message(event):
     if not sender:
         return
 
-    # 管理者指令
+    # 管理者指令（回覆很快，維持同步處理即可）
     if booking_sync.ADMIN_LINE_USER_ID and sender == booking_sync.ADMIN_LINE_USER_ID:
         command = user_message.strip()
         if command in ("同步", "sync"):
@@ -565,14 +604,12 @@ def handle_message(event):
             booking_sync.push_test_async(sender)
             return
 
-    reply = get_ai_reply(sender, user_message)
-    try:
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply),
-        )
-    except LineBotApiError:
-        logger.exception("LINE 回覆失敗 user=%s", sender)
+    # AI 回覆移到背景處理，webhook 立即回 200，避免阻塞與 reply token 逾時
+    threading.Thread(
+        target=_respond_in_background,
+        args=(sender, user_message, event.reply_token),
+        daemon=True,
+    ).start()
 
 
 @app.route("/")
@@ -580,6 +617,9 @@ def index():
     return "Wedding Bot is running"
 
 
+# 注意：對話歷史、長期記憶、排程都存在「單一進程」的記憶體裡，
+# 因此必須以單 worker 啟動（見 Procfile 的 --workers 1）。
+# 若改成多 worker，各進程會各自跑一份排程、且狀態不共享，造成重複同步與資料不一致。
 init_google_sheet()
 booking_sync.start_scheduler()
 
