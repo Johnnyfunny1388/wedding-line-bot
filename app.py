@@ -256,8 +256,14 @@ To view the full wedding menu, tell customers to type: "喜宴菜單"
 [MOST IMPORTANT — Read history first]
 Before EVERY reply, read the ENTIRE conversation history above and note what the customer has ALREADY told you: name, phone, event type, date, time slot (lunch/dinner), table count, special needs. Reuse that information directly. NEVER ask again for anything the customer has already provided — re-asking makes us look unprofessional. Only ask about the items that are still genuinely missing. If you are about to ask a question, first scan the history to confirm the answer is not already there.
 
-[Do NOT contradict things you have no record of]
-A human colleague may be handling this customer in parallel, and their messages do NOT appear in your history. So if the customer refers to something that is not in the conversation above — a specific dish, an arrangement, a price, a decision ("那娃娃菜好了", "就照剛剛說的"), a name — do NOT deny it, correct it, or say "we don't offer that." You may be missing context a colleague already provided. Instead respond gently and defer: e.g.「好的,這部分我為您確認後再回覆/由專人為您處理喔！」. Only state facts that are explicitly in this prompt or in your conversation history. When in doubt, defer to a specialist rather than contradicting the customer.
+[Human handoff detection — STAY SILENT when a colleague is handling it]
+A human colleague may be handling this customer in parallel via manual chat, and the colleague's messages do NOT appear in your history. Detect this and stay out of the way:
+
+STRONG handoff signal → output EXACTLY the token [靜默] and NOTHING else (no greeting, no explanation). Signs of a strong signal: the customer's message clearly responds to something that is NOT in your conversation history — answering a question you never asked, agreeing to or choosing something you never offered ("那娃娃菜好了", "就選第二個", "好,那就這樣"), confirming an arrangement/price/date/dish you have no record of, or continuing a topic you never started. In these cases a colleague is mid-conversation; you must say nothing so you don't interrupt them.
+
+When you are NOT sure it is a handoff but the customer references something you cannot see (a dish, arrangement, name, decision), do NOT deny or correct it — respond gently and defer: e.g.「好的,這部分我為您確認後再回覆/由專人為您處理喔！」.
+
+Reply normally only when the message is something you genuinely can serve from this prompt or your own history (greetings, venue/menu questions, availability, the customer's own booking lookup). Only state facts explicitly in this prompt or your history. When truly in doubt between replying and staying silent, prefer [靜默] — a brief silence is far better than interrupting a colleague with wrong information.
 
 [Reply Rules]
 1. Always reply in Traditional Chinese, warm and professional tone
@@ -451,7 +457,12 @@ def call_claude_with_retry(messages, system_extra=""):
     raise last_error
 
 
+# 利亞判定有真人專員接手時，模型會輸出這個 token，程式據此「完全不回覆」客人
+SILENT_TOKEN = "[靜默]"
+
+
 def get_ai_reply(user_id, user_message):
+    """回傳要發給客人的文字；若回傳 None 代表判定真人接手，保持安靜不回覆。"""
     start = time.monotonic()
     try:
         cleanup_old_conversations()
@@ -507,6 +518,15 @@ def get_ai_reply(user_id, user_message):
             "感謝您的詢問！詳細資訊由專人為您確認",
         )
 
+        # 判定真人專員接手 → 保持安靜，不回覆客人，也不在歷史留下助理訊息
+        if SILENT_TOKEN in reply:
+            save_history_to_sheet(user_id)  # 仍記錄客人這則訊息
+            logger.info(
+                "利亞判定真人接手，保持安靜 user=%s msg_len=%d elapsed=%.2fs",
+                user_id, len(user_message), time.monotonic() - start,
+            )
+            return None
+
         history.append({"role": "assistant", "content": reply})
         trim_history(history)
 
@@ -554,6 +574,8 @@ def _respond_in_background(sender, user_message, reply_token):
     這裡先嘗試 reply（免費額度），逾時或失敗再退回 push（會計入推播額度）。
     """
     reply = get_ai_reply(sender, user_message)
+    if reply is None:
+        return  # 判定真人專員接手，保持安靜不回覆
     message = TextSendMessage(text=reply)
     try:
         line_bot_api.reply_message(reply_token, message)
