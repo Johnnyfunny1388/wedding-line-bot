@@ -135,6 +135,77 @@ def status_report():
     return "\n".join(lines)
 
 
+def _cell(row, idx):
+    return row[idx].strip() if idx is not None and idx < len(row) else ""
+
+
+def _preserve_line_user_ids(data_ws, new_rows):
+    """把舊表已填的 line_user_id 搬到重寫後的新資料，避免 clear() 沖掉。
+
+    - 以「宴席日期|時段|廳別|宴席名稱」精準保留每一列既有的對應
+    - 額外用電話擴散：同一支電話的其他訂席也補上同一個 line_user_id
+      （客人只要綁定一次，名下所有訂席都認得）
+    回傳實際填入的列數。
+    """
+    try:
+        old = data_ws.get_all_values()
+    except Exception:
+        logger.exception("讀取舊 line_user_id 失敗，本次不保留")
+        return 0
+    if len(old) < 2:
+        return 0
+    old_idx = {name: i for i, name in enumerate(old[0])}
+    if "line_user_id" not in old_idx:
+        return 0
+    oid = old_idx["line_user_id"]
+
+    composite_map = {}
+    phone_map = {}
+    for row in old[1:]:
+        uid = _cell(row, oid)
+        if not uid:
+            continue
+        key = (
+            _cell(row, old_idx.get("宴席日期")),
+            _cell(row, old_idx.get("時段")),
+            _cell(row, old_idx.get("廳別")),
+            _cell(row, old_idx.get("宴席名稱")),
+        )
+        composite_map.setdefault(key, uid)
+        for pcol in ("電話(主要)正規化", "電話(次要)正規化"):
+            phone = _cell(row, old_idx.get(pcol))
+            if phone:
+                phone_map.setdefault(phone, uid)
+
+    if not composite_map and not phone_map:
+        return 0
+
+    header = new_rows[0]
+    new_idx = {name: i for i, name in enumerate(header)}
+    nid = new_idx.get("line_user_id")
+    if nid is None:
+        return 0
+
+    filled = 0
+    for row in new_rows[1:]:
+        key = (
+            _cell(row, new_idx.get("宴席日期")),
+            _cell(row, new_idx.get("時段")),
+            _cell(row, new_idx.get("廳別")),
+            _cell(row, new_idx.get("宴席名稱")),
+        )
+        uid = composite_map.get(key)
+        if not uid:
+            for pcol in ("電話(主要)正規化", "電話(次要)正規化"):
+                uid = phone_map.get(_cell(row, new_idx.get(pcol)))
+                if uid:
+                    break
+        if uid:
+            row[nid] = uid
+            filled += 1
+    return filled
+
+
 def run_sync(force=False):
     """執行一次同步。回傳 (success, message)，message 為人看的摘要。"""
     global _last_synced_modified_time
@@ -187,6 +258,9 @@ def run_sync(force=False):
             logger.info("解析完成 %d 筆，開始寫入總表", len(records))
 
             data_ws = _get_or_create_tab(spreadsheet, DATA_TAB)
+            # 保護既有的 line_user_id（手動/GAS 寫入的）不被 clear 沖掉
+            preserved = _preserve_line_user_ids(data_ws, rows)
+            logger.info("保留 line_user_id 對應 %d 列", preserved)
             data_ws.clear()
             data_ws.update(values=rows, range_name="A1")
 

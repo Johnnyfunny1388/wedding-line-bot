@@ -69,6 +69,7 @@ def _load_rows():
                     "訂席人": cell(row, "聯絡人(主要)"),
                     "電話1": cell(row, "電話(主要)正規化"),
                     "電話2": cell(row, "電話(次要)正規化"),
+                    "line_user_id": cell(row, "line_user_id"),
                 }
             )
         _cache["rows"] = rows
@@ -85,27 +86,8 @@ def _normalize_date(date_str):
     return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
 
 
-def lookup_bookings_by_phone(phone):
-    """用電話號碼找客人自己的訂席。
-
-    給 Ria 的客人身分查詢工具。刻意不回傳任何金額欄位（訂金、桌價），
-    金額一律由專人處理。「訂席人」欄位僅供 Ria 核對身分用。
-    """
-    digits = re.sub(r"\D", "", str(phone or ""))
-    if len(digits) < 8:
-        return {"錯誤": "電話號碼不完整，請向客人確認完整的訂席電話"}
-
-    rows = _load_rows()
-    matches = [
-        r for r in rows
-        if digits and (r["電話1"] == digits or r["電話2"] == digits)
-    ]
-    if not matches:
-        return {
-            "找到筆數": 0,
-            "說明": "查無此電話的訂席紀錄，請告知客人將由專人協助確認",
-        }
-
+def _format_bookings(matches):
+    """把訂席列整理成給 AI 的結構（不含任何金額欄位）。"""
     bookings = []
     for r in sorted(matches, key=lambda r: r["日期"])[:3]:
         bookings.append(
@@ -120,14 +102,46 @@ def lookup_bookings_by_phone(phone):
                 "訂席人姓名": r["訂席人"],
             }
         )
+    return bookings
+
+
+def lookup_bookings_by_phone(phone):
+    """用電話號碼找客人自己的訂席（AI 工具，需先核對身分）。"""
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if len(digits) < 8:
+        return {"錯誤": "電話號碼不完整，請向客人確認完整的訂席電話"}
+
+    rows = _load_rows()
+    matches = [
+        r for r in rows
+        if digits and (r["電話1"] == digits or r["電話2"] == digits)
+    ]
+    if not matches:
+        return {
+            "找到筆數": 0,
+            "說明": "查無此電話的訂席紀錄，請告知客人將由專人協助確認",
+        }
     return {
         "找到筆數": len(matches),
-        "訂席資料": bookings,
+        "訂席資料": _format_bookings(matches),
         "說明": (
             "透露任何內容前必須先核對身分：請客人說出訂席人姓名，"
             "與「訂席人姓名」欄位比對相符才可告知；金額一律不透露"
         ),
     }
+
+
+def lookup_bookings_by_line_id(user_id):
+    """用 LINE user_id 找該客人的訂席。找不到回傳 None（給對話開場自動辨識用）。"""
+    if not user_id:
+        return None
+    try:
+        rows = _load_rows()
+    except Exception:
+        logger.exception("以 line_user_id 查訂席失敗")
+        return None
+    matches = [r for r in rows if r.get("line_user_id") == user_id]
+    return _format_bookings(matches) if matches else None
 
 
 def _booked_main_halls(slot_rows):

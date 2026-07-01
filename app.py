@@ -430,6 +430,43 @@ def _previous_context_note(user_id):
     )
 
 
+def _known_customer_note(user_id):
+    """對話開場自動辨識老客人：用 line_user_id 查訂席，查不到再用電話備援。
+
+    保守（A 方案）：帶入已知資訊避免重複詢問，但不主動報出敏感細節。
+    """
+    bookings = availability.lookup_bookings_by_line_id(user_id)
+    if not bookings:
+        phone = customer_phones.get(user_id, "")
+        if phone:
+            result = availability.lookup_bookings_by_phone(phone)
+            if isinstance(result, dict) and result.get("找到筆數"):
+                bookings = result.get("訂席資料")
+    if not bookings:
+        return ""
+
+    lines = []
+    for b in bookings:
+        lines.append(
+            f"- 訂席人：{b.get('訂席人姓名','')}、宴席日期：{b.get('宴席日期','')} "
+            f"{b.get('時段','')}、廳別：{b.get('廳別','')}、桌數：{b.get('桌數','')}、"
+            f"宴席名稱：{b.get('宴席名稱','')}、狀態：{b.get('訂席狀態','')}"
+        )
+    return (
+        "\n[Known Customer — this LINE user already has a booking on record]\n"
+        + "\n".join(lines)
+        + "\n\nRules (conservative):\n"
+        "1. Use this ONLY to avoid re-asking known info (name, date, hall, table count). "
+        "Never ask for something already known above.\n"
+        "2. You MAY greet warmly as a returning customer, but do NOT proactively recite "
+        "their booking details unless the customer asks about their own booking.\n"
+        "3. Never reveal money/deposit/pricing. For changes, cancellations, menu or "
+        "arrangement details, defer to a specialist — never confirm changes yourself.\n"
+        "4. If the customer's message looks like a reply to a human colleague (handoff "
+        "signal), the [靜默] rule still applies — stay silent."
+    )
+
+
 def call_claude_with_retry(messages, system_extra=""):
     """呼叫 Claude API，可重試的錯誤最多重試 3 次，每次間隔 2 秒。"""
     last_error = None
@@ -481,7 +518,7 @@ def get_ai_reply(user_id, user_message):
         trim_history(history)
 
         # 工具回合（查檔期）用獨立的工作清單，只把最終文字回覆存進對話歷史
-        system_extra = _previous_context_note(user_id)
+        system_extra = _previous_context_note(user_id) + _known_customer_note(user_id)
         working_messages = list(history)
         response = call_claude_with_retry(working_messages, system_extra)
         tool_rounds = 0
