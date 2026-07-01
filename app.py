@@ -436,32 +436,41 @@ def _known_customer_note(user_id):
     保守（A 方案）：帶入已知資訊避免重複詢問，但不主動報出敏感細節。
     """
     bookings = availability.lookup_bookings_by_line_id(user_id)
+    matched_by = "line_id"
     if not bookings:
         phone = customer_phones.get(user_id, "")
         if phone:
             result = availability.lookup_bookings_by_phone(phone)
             if isinstance(result, dict) and result.get("找到筆數"):
                 bookings = result.get("訂席資料")
+                matched_by = "phone"
     if not bookings:
         return ""
 
+    logger.info(
+        "辨識老客人 user=%s matched_by=%s 筆數=%d", user_id, matched_by, len(bookings)
+    )
     lines = []
     for b in bookings:
         lines.append(
-            f"- 訂席人：{b.get('訂席人姓名','')}、宴席日期：{b.get('宴席日期','')} "
+            f"- 訂席人：{b.get('訂席人姓名','') or '（未填）'}、宴席日期：{b.get('宴席日期','')} "
             f"{b.get('時段','')}、廳別：{b.get('廳別','')}、桌數：{b.get('桌數','')}、"
             f"宴席名稱：{b.get('宴席名稱','')}、狀態：{b.get('訂席狀態','')}"
         )
     return (
-        "\n[Known Customer — this LINE user already has a booking on record]\n"
+        "\n[Known Customer — THIS customer is ALREADY identified by their LINE account]\n"
+        "This customer's LINE account is linked to the booking(s) below. Their identity is "
+        "ALREADY confirmed by the LINE account itself. This OVERRIDES the [Customer Booking "
+        "Lookup Rules]: you must NOT ask for their phone number or their name to verify "
+        "identity — that would be redundant and annoying. Do not call lookup_my_booking for "
+        "them; the data is already here:\n"
         + "\n".join(lines)
-        + "\n\nRules (conservative):\n"
-        "1. Use this ONLY to avoid re-asking known info (name, date, hall, table count). "
-        "Never ask for something already known above.\n"
-        "2. You MAY greet warmly as a returning customer, but do NOT proactively recite "
-        "their booking details unless the customer asks about their own booking.\n"
+        + "\n\nRules:\n"
+        "1. When the customer asks about their booking (我的訂席/我訂的...), directly and warmly "
+        "tell them the 宴席日期 / 時段 / 廳別 / 桌數 from above. Do NOT ask for phone or name first.\n"
+        "2. Never re-ask information already known above.\n"
         "3. Never reveal money/deposit/pricing. For changes, cancellations, menu or "
-        "arrangement details, defer to a specialist — never confirm changes yourself.\n"
+        "arrangement details, say a specialist will follow up — never confirm changes yourself.\n"
         "4. If the customer's message looks like a reply to a human colleague (handoff "
         "signal), the [靜默] rule still applies — stay silent."
     )
