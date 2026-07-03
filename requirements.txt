@@ -1,7 +1,8 @@
-flask
-gunicorn
-line-bot-sdk
-anthropic
-gspread
-google-auth
-openpyxl
+# 鎖住主版本：避免某次部署自動裝到不相容的新大版把服務弄壞
+flask>=3,<4
+gunicorn>=21,<24
+line-bot-sdk>=3,<4
+anthropic>=0.40,<1
+gspread>=6,<7
+google-auth>=2,<3
+openpyxl>=3.1,<4

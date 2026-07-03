@@ -7,6 +7,7 @@
 3. 有實質內容才寫入「LINE新詢問」分頁（避免純閒聊也進表）
 4. LINE 推播通知管理者
 """
+import os
 import json
 import time
 import logging
@@ -68,8 +69,6 @@ def _conversation_text(history):
 
 def _extract(history):
     """用 Claude 從對話抽取結構化欄位。失敗回傳 None。"""
-    import os
-
     client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
     today = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d")
     system = (
@@ -140,6 +139,12 @@ def _worker(user_id, history, fallback_phone):
     try:
         data = _extract(history)
         if data is None:
+            # 抽取失敗不能靜默漏接客人——通知管理者去原始對話紀錄查看
+            _notify_admin(
+                "⚠️ 有一段客人對話結束了，但需求自動整理失敗。\n"
+                "請到「客人Line詢問資訊」表查看原始對話\n"
+                f"（user_id 開頭：{user_id[:12]}…）"
+            )
             return
         if not data.get("聯絡電話") and fallback_phone:
             data["聯絡電話"] = fallback_phone

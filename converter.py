@@ -78,10 +78,16 @@ def _norm_header(value):
 
 
 def normalize_phone(value):
-    """電話正規化：只留數字，供比對用（0988-602-016 → 0988602016）。"""
+    """電話正規化：只留數字，供比對用（0988-602-016 → 0988602016）。
+
+    Excel 把手機存成數字格式時會吃掉開頭的 0（0972... 變 972...），
+    9 碼且 9 開頭的自動補回 0，否則與客人在 LINE 留的 10 碼比對不到。
+    """
     if value is None:
         return ""
     digits = re.sub(r"\D", "", str(value))
+    if len(digits) == 9 and digits.startswith("9"):
+        digits = "0" + digits
     return digits
 
 
@@ -187,9 +193,10 @@ if __name__ == "__main__":
     import sys
 
     sys.stdout.reconfigure(encoding="utf-8")
-    src = sys.argv[1] if len(sys.argv) > 1 else (
-        r"C:\Users\鴻逵\Downloads\維多利亞宴會館_115年_訂席資料表_完整版.xlsx"
-    )
+    if len(sys.argv) < 2:
+        print("用法：python converter.py <訂席資料表.xlsx>")
+        sys.exit(1)
+    src = sys.argv[1]
     records, issues = parse_workbook(src)
     print(f"共解析 {len(records)} 筆")
     closed = sum(1 for r in records if r["訂席狀態"] == "公休")

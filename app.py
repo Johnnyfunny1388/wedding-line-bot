@@ -46,6 +46,16 @@ previous_history = {}   # 已結束（閒置逾時）的上一段對話，當作
 customer_phones = {}    # user_id -> 客人在對話中留下的電話（正規化），訂席查詢用
 last_active = {}
 
+# 同一位客人的訊息必須排隊依序處理（客人常連發短句，並行處理會讓
+# 對話歷史交錯、回覆亂序）；不同客人之間仍然並行。
+_user_locks = {}
+_user_locks_guard = threading.Lock()
+
+
+def _get_user_lock(user_id):
+    with _user_locks_guard:
+        return _user_locks.setdefault(user_id, threading.Lock())
+
 # 台灣電話格式：手機 09xx-xxx-xxx、市話 0x-xxxxxxx（含各種分隔寫法）
 PHONE_PATTERN = re.compile(r"09\d{2}[\s\-]?\d{3}[\s\-]?\d{3}|0\d{1,2}[\s\-]?\d{3,4}[\s\-]?\d{4}")
 
@@ -177,11 +187,14 @@ def cleanup_old_conversations():
     """閒置逾時的對話不再丟棄，改轉入 previous_history 當長期記憶。"""
     now = datetime.now(timezone.utc)
     for user_id in list(last_active.keys()):
-        if (now - last_active[user_id]).total_seconds() > HISTORY_TTL_SECONDS:
+        last = last_active.get(user_id)
+        if last is None:
+            continue  # 另一個執行緒已處理掉
+        if (now - last).total_seconds() > HISTORY_TTL_SECONDS:
             history = conversation_history.pop(user_id, None)
             if history:
                 _remember_previous(user_id, history)
-            del last_active[user_id]
+            last_active.pop(user_id, None)
 
 
 SYSTEM_PROMPT = """
@@ -325,7 +338,7 @@ You also have a tool "lookup_my_booking" to find a customer's own booking by pho
 
 
 def trim_history(history):
-    """保留最近 6 則，並確保第一則是 user（Claude API 要求）。"""
+    """保留最近 MAX_HISTORY_MESSAGES 則，並確保第一則是 user（Claude API 要求）。"""
     if len(history) > MAX_HISTORY_MESSAGES:
         del history[:-MAX_HISTORY_MESSAGES]
     while history and history[0]["role"] == "assistant":
@@ -431,24 +444,18 @@ def _previous_context_note(user_id):
 
 
 def _known_customer_note(user_id):
-    """對話開場自動辨識老客人：用 line_user_id 查訂席，查不到再用電話備援。
+    """對話開場自動辨識老客人：只信任人工綁定的 line_user_id。
 
-    保守（A 方案）：帶入已知資訊避免重複詢問，但不主動報出敏感細節。
+    刻意「不」用客人聊天中自己留的電話當備援——那是未經驗證的自稱，
+    陌生人只要打出別人的電話號碼就能冒充身分、跳過姓名核對。
+    電話查詢一律走 lookup_my_booking 工具流程（必須核對訂席人姓名）。
     """
     bookings = availability.lookup_bookings_by_line_id(user_id)
-    matched_by = "line_id"
-    if not bookings:
-        phone = customer_phones.get(user_id, "")
-        if phone:
-            result = availability.lookup_bookings_by_phone(phone)
-            if isinstance(result, dict) and result.get("找到筆數"):
-                bookings = result.get("訂席資料")
-                matched_by = "phone"
     if not bookings:
         return ""
 
     logger.info(
-        "辨識老客人 user=%s matched_by=%s 筆數=%d", user_id, matched_by, len(bookings)
+        "辨識老客人 user=%s matched_by=line_id 筆數=%d", user_id, len(bookings)
     )
     lines = []
     for b in bookings:
@@ -619,7 +626,9 @@ def _respond_in_background(sender, user_message, reply_token):
     容易撐爆 LINE 的 reply token 時效，導致客人收不到回覆。
     這裡先嘗試 reply（免費額度），逾時或失敗再退回 push（會計入推播額度）。
     """
-    reply = get_ai_reply(sender, user_message)
+    # 同一位客人的訊息排隊處理，避免連發短句時對話歷史被並行寫壞
+    with _get_user_lock(sender):
+        reply = get_ai_reply(sender, user_message)
     if reply is None:
         return  # 判定真人專員接手，保持安靜不回覆
     message = TextSendMessage(text=reply)

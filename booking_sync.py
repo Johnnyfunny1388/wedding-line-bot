@@ -139,19 +139,15 @@ def _cell(row, idx):
     return row[idx].strip() if idx is not None and idx < len(row) else ""
 
 
-def _preserve_line_user_ids(data_ws, new_rows):
-    """把舊表已填的 line_user_id 搬到重寫後的新資料，避免 clear() 沖掉。
+def _preserve_line_user_ids(old, new_rows):
+    """把舊表已填的 line_user_id 搬到重寫後的新資料。
 
     - 以「宴席日期|時段|廳別|宴席名稱」精準保留每一列既有的對應
     - 額外用電話擴散：同一支電話的其他訂席也補上同一個 line_user_id
       （客人只要綁定一次，名下所有訂席都認得）
+    old 由呼叫端讀取（讀取失敗時呼叫端必須中止同步，否則綁定會被覆寫弄丟）。
     回傳實際填入的列數。
     """
-    try:
-        old = data_ws.get_all_values()
-    except Exception:
-        logger.exception("讀取舊 line_user_id 失敗，本次不保留")
-        return 0
     if len(old) < 2:
         return 0
     old_idx = {name: i for i, name in enumerate(old[0])}
@@ -258,11 +254,26 @@ def run_sync(force=False):
             logger.info("解析完成 %d 筆，開始寫入總表", len(records))
 
             data_ws = _get_or_create_tab(spreadsheet, DATA_TAB)
-            # 保護既有的 line_user_id（手動/GAS 寫入的）不被 clear 沖掉
-            preserved = _preserve_line_user_ids(data_ws, rows)
+            # 讀舊表以保留 line_user_id（手動/GAS 寫入的綁定）。
+            # 讀取失敗必須中止：若照樣覆寫，綁定會被永久弄丟。
+            old_values = data_ws.get_all_values()
+            preserved = _preserve_line_user_ids(old_values, rows)
             logger.info("保留 line_user_id 對應 %d 列", preserved)
-            data_ws.clear()
+
+            # 「覆寫→修尾」而非「清空→重寫」：任何一步失敗都不會留下空表
             data_ws.update(values=rows, range_name="A1")
+            if len(old_values) > len(rows):
+                data_ws.batch_clear(
+                    [f"A{len(rows) + 1}:ZZ{len(old_values)}"]
+                )
+
+            # 總表更新完成 → 立即清掉利亞的檔期快取，讓她馬上讀到新資料
+            # （在函式內 import 以避免模組層的循環引用）
+            try:
+                import availability
+                availability.invalidate_cache()
+            except Exception:
+                logger.exception("清除檔期快取失敗（不影響同步結果）")
 
             now_taipei = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
             report_ws.append_row(

@@ -14,6 +14,7 @@ import threading
 import gspread
 
 from booking_sync import MACHINE_SHEET_ID, DATA_TAB, _load_credentials
+from converter import normalize_phone
 
 logger = logging.getLogger("ria.availability")
 
@@ -21,6 +22,13 @@ CACHE_TTL_SECONDS = 600
 
 _cache = {"rows": None, "loaded_at": 0.0}
 _cache_lock = threading.Lock()
+
+
+def invalidate_cache():
+    """同步完成後立即清掉快取，讓利亞馬上讀到最新檔期。"""
+    with _cache_lock:
+        _cache["rows"] = None
+        _cache["loaded_at"] = 0.0
 
 
 def _load_rows():
@@ -107,7 +115,7 @@ def _format_bookings(matches):
 
 def lookup_bookings_by_phone(phone):
     """用電話號碼找客人自己的訂席（AI 工具，需先核對身分）。"""
-    digits = re.sub(r"\D", "", str(phone or ""))
+    digits = normalize_phone(phone)
     if len(digits) < 8:
         return {"錯誤": "電話號碼不完整，請向客人確認完整的訂席電話"}
 
