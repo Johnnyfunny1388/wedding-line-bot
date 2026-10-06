@@ -529,6 +529,60 @@ def call_claude_with_retry(messages, system_extra=""):
 # 利亞判定有真人專員接手時，模型會輸出這個 token，程式據此「完全不回覆」客人
 SILENT_TOKEN = "[靜默]"
 
+# ---------------------------------------------------------------------------
+# 斷線警報：Claude 呼叫失敗時 LINE 通知管理者（同類問題一小時最多一次），
+# 恢復正常時再通知一次。避免額度用完等問題靜悄悄地讓客人只收到保底訊息。
+# ---------------------------------------------------------------------------
+AI_ALERT_COOLDOWN_SECONDS = 3600
+_ai_alert_last_sent = {}   # 錯誤類別 -> 上次通知時間
+_ai_alert_active = False   # 是否有尚未解除的警報（用來發「已恢復」通知）
+_ai_alert_lock = threading.Lock()
+
+
+def _classify_ai_error(exc):
+    """把例外轉成（類別, 給老闆看的原因）。"""
+    if isinstance(exc, anthropic.AuthenticationError):
+        return "auth", "Anthropic API 金鑰失效，請檢查 Render 的 ANTHROPIC_API_KEY"
+    if isinstance(exc, anthropic.PermissionDeniedError):
+        return "permission", "Anthropic API 金鑰權限不足"
+    if isinstance(exc, anthropic.BadRequestError) and "credit balance" in str(exc).lower():
+        return "credit", "Anthropic 帳戶額度不足，請到 console.anthropic.com 儲值"
+    if isinstance(exc, anthropic.RateLimitError):
+        return "rate_limit", "Anthropic API 流量超過上限（重試 3 次仍失敗）"
+    if isinstance(exc, anthropic.APIConnectionError):
+        return "connection", "無法連線到 Anthropic（網路或服務中斷）"
+    if isinstance(exc, anthropic.APIStatusError) and exc.status_code >= 500:
+        return "server", f"Anthropic 服務異常（HTTP {exc.status_code}），通常會自行恢復"
+    name = type(exc).__name__
+    return f"other:{name}", f"未預期的錯誤（{name}），請查看 Render log"
+
+
+def _alert_ai_failure(exc):
+    global _ai_alert_active
+    category, reason = _classify_ai_error(exc)
+    now = time.time()
+    with _ai_alert_lock:
+        _ai_alert_active = True
+        if now - _ai_alert_last_sent.get(category, 0) < AI_ALERT_COOLDOWN_SECONDS:
+            return
+        _ai_alert_last_sent[category] = now
+    booking_sync._notify_admin(
+        "⚠️ 利亞無法回覆客人\n"
+        f"原因：{reason}\n"
+        "目前客人只會收到「請專人聯繫」的保底訊息。\n"
+        "（同一問題一小時內不再重複通知，恢復後會再通知您）"
+    )
+
+
+def _clear_ai_alert():
+    global _ai_alert_active
+    with _ai_alert_lock:
+        if not _ai_alert_active:
+            return
+        _ai_alert_active = False
+        _ai_alert_last_sent.clear()
+    booking_sync._notify_admin("✅ 利亞已恢復正常，可以回覆客人了")
+
 
 def get_ai_reply(user_id, user_message):
     """回傳要發給客人的文字；若回傳 None 代表判定真人接手，保持安靜不回覆。"""
@@ -586,6 +640,7 @@ def get_ai_reply(user_id, user_message):
             (block.text for block in response.content if block.type == "text"),
             "感謝您的詢問！詳細資訊由專人為您確認",
         )
+        _clear_ai_alert()  # Claude 呼叫成功；若先前有斷線警報，通知已恢復
 
         # 判定真人專員接手 → 保持安靜，不回覆客人，也不在歷史留下助理訊息
         if SILENT_TOKEN in reply:
@@ -613,11 +668,12 @@ def get_ai_reply(user_id, user_message):
         )
         return reply + "\n\n— 以上由AI助理利亞回覆 👩‍💼"
 
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "AI 回覆失敗 user=%s msg_len=%d elapsed=%.2fs",
             user_id, len(user_message), time.monotonic() - start,
         )
+        _alert_ai_failure(exc)
         return "感謝您的訊息！我們會盡快請專人與您聯繫"
 
 
